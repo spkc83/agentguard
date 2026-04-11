@@ -26,12 +26,14 @@ agentguard/
 │   │   └── reporter.py          # Compliance attestation report generator
 │   ├── domains/                 # Layer 3: Domain Toolkits
 │   │   └── finance/
-│   │       ├── fraud/
-│   │       │   ├── agent_templates.py   # Fraud investigation agent templates
-│   │       │   ├── sar_pipeline.py      # SAR generation pipeline
-│   │       │   └── red_team.py          # Adversarial eval suite
+│   │       ├── credit_risk/
+│   │       │   ├── agent_templates.py   # Credit decisioning agent templates
+│   │       │   ├── adverse_action.py    # ECOA/Reg B adverse action notice generation
+│   │       │   ├── model_validation.py  # SR 11-7 model validation agent patterns
+│   │       │   ├── fairness.py          # Disparate impact / equalized odds analysis
+│   │       │   └── red_team.py          # Credit AI adversarial eval suite
 │   │       ├── synthetic/
-│   │       │   ├── wgan_gp.py           # Wasserstein GAN-GP for tabular fraud data
+│   │       │   ├── wgan_gp.py           # Wasserstein GAN-GP for tabular credit data
 │   │       │   └── generators.py        # High-level synthetic data API
 │   │       └── pii.py                   # PII detection and masking
 │   ├── observability/           # Layer 4: Observability
@@ -50,8 +52,8 @@ agentguard/
 │   ├── integration/
 │   └── red_team/                # Adversarial test scenarios
 ├── examples/
-│   ├── fraud_investigation/     # End-to-end fraud agent demo
-│   ├── sar_generation/          # SAR pipeline demo
+│   ├── credit_decisioning/      # End-to-end credit decisioning agent demo
+│   ├── adverse_action_generation/ # Adverse action notice pipeline demo
 │   └── quickstart.py            # 5-minute getting started
 ├── docs/
 │   ├── architecture.md          # Links to ARCHITECTURE.md
