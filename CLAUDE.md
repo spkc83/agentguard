@@ -1,6 +1,6 @@
 # AgentGuard — Claude Code Context
 
-AgentGuard is an **open-source, framework-agnostic agent governance and security runtime** for AI agents in regulated industries. It provides security, compliance, and observability as a middleware layer — sitting between agent orchestration frameworks (LangGraph, CrewAI, Google ADK) and the tools/services they access, enforcing RBAC, sandboxed execution, immutable audit logging, circuit breakers, and policy-as-code compliance rules. Financial services / fraud detection is the flagship domain.
+AgentGuard is an **open-source, framework-agnostic agent governance and security runtime** for AI agents in regulated industries. It provides security, compliance, and observability as a middleware layer — sitting between agent orchestration frameworks (LangGraph, CrewAI, Google ADK) and the tools/services they access, enforcing RBAC, sandboxed execution, immutable audit logging, circuit breakers, and policy-as-code compliance rules. Financial services / credit risk is the flagship domain.
 
 ---
 
@@ -257,7 +257,7 @@ When generating synthetic data, use the Wasserstein GAN with gradient penalty (W
 - **Do not** make the governance layer opinionated about which LLM provider to use
 - **Do not** hard-code financial services into the core — it must be a pluggable domain module
 - **Do not** add a UI to the core package — the observability dashboard is a separate optional install
-- **Do not** build fraud detection or AML/SAR use cases — use credit risk and credit decisioning instead
+- **Do not** build use cases outside the credit risk domain — the flagship domain is credit decisioning, adverse action, model validation, and fairness analysis
 - **Do not** use employer's proprietary data, models, or methodologies as reference implementations
 
 ---

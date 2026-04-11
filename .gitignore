@@ -14,3 +14,6 @@ build/
 htmlcov/
 *.so
 .omc/
+.claude/
+docs/superpowers/
+quickstart-audit/

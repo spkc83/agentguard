@@ -23,7 +23,7 @@ AgentGuard is a **governance middleware** — it does not orchestrate agents; it
 │  └──────────────────────────────────────────────────────────┘   │
 │  ┌──────────────────────────────────────────────────────────┐   │
 │  │  Layer 3: Domain Toolkit (Finance / Healthcare / Gov)     │   │
-│  │  Fraud Templates → SAR Pipeline → Synthetic Data → PII   │   │
+│  │  Credit Risk → Adverse Action → Synthetic Data → PII     │   │
 │  └──────────────────────────────────────────────────────────┘   │
 │  ┌──────────────────────────────────────────────────────────┐   │
 │  │  Layer 4: Observability                                   │   │
@@ -179,7 +179,7 @@ The compliance engine evaluates a set of YAML-defined policy rules against every
 - Maps to SR 11-7 (Fed model risk management guidance) requirements
 
 **EU AI Act** (`policies/eu_ai_act.yaml`):
-- Annex III High-Risk AI: credit scoring (Article 6), fraud detection
+- Annex III High-Risk AI: credit scoring (Article 6)
 - Article 9: Risk management system requirements
 - Article 10: Data governance requirements
 - Article 13: Transparency and information provision
@@ -412,7 +412,7 @@ AgentGuard wraps MCP tool calls at the `call_tool` boundary:
 result = await mcp_client.call_tool("web_search", {"query": "..."})
 
 # AgentGuard-wrapped:
-async with AgentGuard.mcp_context(agent_id="fraud-agent-1") as guard:
+async with AgentGuard.mcp_context(agent_id="credit-agent-1") as guard:
     result = await guard.call_tool("web_search", {"query": "..."})
     # Internally: identity → RBAC → policy → audit → sandbox → execute → return
 ```
