@@ -11,6 +11,7 @@ Resolution order:
 from __future__ import annotations
 
 import fnmatch
+from typing import Literal
 
 import structlog
 from pydantic import BaseModel, ConfigDict
@@ -33,7 +34,7 @@ class Permission(BaseModel):
 
     action: str
     resource: str
-    effect: str
+    effect: Literal["allow", "deny"]
 
     def matches(self, action: str, resource: str) -> bool:
         """Check if this permission matches the given action and resource."""

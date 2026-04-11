@@ -11,7 +11,7 @@ license = { text = "MIT" }
 requires-python = ">=3.11"
 keywords = [
     "ai-agents", "llm", "security", "compliance", "governance",
-    "mcp", "a2a", "fraud-detection", "fintech", "audit",
+    "mcp", "a2a", "credit-risk", "fintech", "audit",
     "rbac", "sandbox", "agentic-ai"
 ]
 classifiers = [

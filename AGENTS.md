@@ -89,7 +89,7 @@ This file defines specialized agent roles for use with Claude Code's multi-agent
 - All credit agent templates must be parameterizable — no hardcoded thresholds, institution names, or cut-off scores
 - Model validation agents must follow SR 11-7 structure: conceptual soundness, ongoing monitoring, outcomes analysis
 - WGAN-GP generates credit application features: FICO, DTI, LTV, income, employment_status, loan_purpose, delinquency_history
-- Do NOT implement fraud detection, AML, SAR generation, or BSA-related use cases
+- The flagship domain is credit risk — credit decisioning, adverse action, model validation, and fairness analysis
 
 **Handoff contract (outputs):**
 - `SyntheticCreditDataset` — Pandas DataFrame with schema documented in `datasets/README.md`

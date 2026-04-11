@@ -65,7 +65,7 @@
   - `Permission` and `Role` models
   - `PermissionChecker` with deny-override resolution
   - `async def check(identity, action, resource) -> PermissionContext`
-  - Built-in roles: `fraud-analyst`, `fraud-investigator`, `system-agent`, `readonly`
+  - Built-in roles: `credit-analyst`, `credit-reviewer`, `system-agent`, `readonly`
 - [ ] Unit tests: permission grant, permission deny, deny-override, role inheritance
 - [ ] Integration test: register agent → check permission → write audit event
 
@@ -77,7 +77,7 @@
 - [ ] Write HuggingFace blog post draft: "AgentGuard: Why AI agents need a security runtime"
 
 **HuggingFace action (Month 1 end):**
-- Push first synthetic dataset: `agentguard/synthetic-fraud-transactions-v1` (generate with simple SMOTE first; WGAN-GP in M4)
+- Push first synthetic dataset: `agentguard/synthetic-credit-applications-v1` (generate with simple SMOTE first; WGAN-GP in M4)
 - Dataset card with full documentation
 - Post to r/MachineLearning, r/LocalLLaMA — "I built a governance middleware for AI agents"
 
@@ -225,17 +225,17 @@
 - [ ] Implement `agentguard/integrations/langgraph.py`:
   - `@governed_node` decorator for LangGraph nodes
   - `GovernedStateGraph` wrapper for full graph governance
-  - Example: `examples/langgraph_fraud_investigation.py`
+  - Example: `examples/langgraph_credit_decisioning.py`
 - [ ] Implement `agentguard/integrations/crewai.py`:
   - `GovernedTool` wrapper for CrewAI tools
   - `GovernedCrew` wrapper applying governance to all agents in a crew
-  - Example: `examples/crewai_fraud_crew.py`
+  - Example: `examples/crewai_credit_crew.py`
 
 **Month 9:**
 - [ ] Implement `agentguard/integrations/google_adk.py`:
   - ADK `BaseTool` subclass with governance built in
   - ADK agent runner wrapper
-  - Example: `examples/adk_fraud_agent.py`
+  - Example: `examples/adk_credit_agent.py`
 - [ ] Implement `agentguard/integrations/a2a_middleware.py`:
   - A2A `MessageSend` interceptor
   - Agent-to-agent trust graph enforcement

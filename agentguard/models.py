@@ -77,6 +77,7 @@ class PolicyResult(BaseModel):
 class AuditEvent(BaseModel):
     """A single entry in the immutable audit log.
 
+    Frozen after creation — use model_copy(update={...}) to create modified copies.
     Every tool call, permission check, and policy evaluation produces an AuditEvent.
     Events are written BEFORE execution (log-first, act-second).
 
@@ -94,6 +95,8 @@ class AuditEvent(BaseModel):
         event_hash: HMAC-SHA256 hash of this event (set by audit logger).
         prev_hash: HMAC-SHA256 hash of the previous event in the chain.
     """
+
+    model_config = ConfigDict(frozen=True)
 
     event_id: str
     timestamp: datetime

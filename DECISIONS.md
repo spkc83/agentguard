@@ -209,12 +209,12 @@ This document logs all significant architectural decisions made during AgentGuar
 5. WGAN-GP (gradient penalty) ← chosen
 6. TabDDPM (diffusion) — state of the art but requires significant compute
 
-**Decision:** WGAN-GP with conditional generation. Gradient penalty provides stable training. Conditional generation (on the fraud label) allows controlled class imbalance in output. Architecture is a TabGAN variant with embedding layers for categorical features.
+**Decision:** WGAN-GP with conditional generation. Gradient penalty provides stable training. Conditional generation (on the default label) allows controlled class imbalance in output. Architecture is a TabGAN variant with embedding layers for categorical features.
 
 **Consequences:**
-- Positive: Stable training on 4GB VRAM hardware (GTX 970) for typical fraud dataset sizes
+- Positive: Stable training on 4GB VRAM hardware (GTX 970) for typical credit dataset sizes
 - Positive: Well-understood architecture; reviewable implementation
-- Positive: Conditional generation essential for fraud use case (1:500 class ratio)
+- Positive: Conditional generation essential for credit risk use case (imbalanced default rates)
 - Negative: Not state-of-the-art fidelity vs. diffusion models
 - Negative: Requires careful hyperparameter tuning per dataset
 - Future: TabDDPM backend as optional `agentguard[diffusion]` install when GPU compute available
@@ -282,28 +282,27 @@ pip install agentguard[all]         # everything
 
 ---
 
-## ADR-014 — Credit risk as flagship domain (replacing fraud detection)
-**Status:** Accepted  
+## ADR-014 — Credit risk as flagship financial services domain
+**Status:** Accepted
 **Date:** 2026-04-10
 
-**Context:** The project owner currently works at a bank leading AI initiatives in an area that includes fraud. Building fraud detection tooling as an open-source project creates potential conflict of interest and IP concerns with the current employer, even when using entirely synthetic data and general methodologies.
+**Context:** The flagship domain module needs a well-defined regulatory environment with concrete compliance requirements that can be formally verified. Credit risk offers this: EU AI Act Annex III explicitly names credit scoring as High-Risk AI, ECOA/Regulation B mandate adverse action notices with deterministic reason ordering, and SR 11-7 requires structured model validation workflows.
 
-**Decision:** Replace all fraud detection, AML, SAR, and BSA-related use cases in the domain toolkit with credit risk use cases: credit decisioning agents, adverse action generation (ECOA/Reg B), SR 11-7 model validation workflows, and fairness analysis for credit models. The synthetic data generator targets credit application and loan performance data rather than transaction monitoring data.
+**Decision:** Credit risk is the flagship financial services domain: credit decisioning agents, adverse action generation (ECOA/Reg B), SR 11-7 model validation workflows, and fairness analysis for credit models. The synthetic data generator targets credit application and loan performance data.
 
-**Why credit risk is equally strong or stronger:**
-- Credit scoring is explicitly named as High-Risk AI in EU AI Act Annex III — regulatory stakes are identical
+**Why credit risk:**
+- Credit scoring is explicitly named as High-Risk AI in EU AI Act Annex III
 - ECOA/Regulation B adverse action requirements create concrete, verifiable compliance rules Z3 can formally prove
 - SR 11-7 model validation is a well-defined regulatory obligation that maps cleanly to an agent workflow
 - Credit model fairness (disparate impact under ECOA/FHA) is a major active regulatory enforcement area
-- Synthetic credit data (applications, loan performance) is clearly non-proprietary and has no resemblance to employer data
+- Synthetic credit data (applications, loan performance) is clearly non-proprietary
 - The AI4Finance Foundation (19K+ stars on FinGPT) has strong credit risk representation, providing community on-ramp
 
 **Consequences:**
-- Positive: No conflict of interest or IP concerns with current employer
-- Positive: Credit risk domain has stronger formal verification opportunities (monotonicity, determinism)
-- Positive: ECOA/FHA fairness requirements are more concrete and legible to regulators than AML rules
-- Negative: Loses AML/SAR use case which has strong industry demand
-- Negative: Credit decisioning has more established commercial tools (Zest AI, Upstart) — more competitive space
+- Positive: Strong formal verification opportunities (monotonicity, adverse action determinism)
+- Positive: ECOA/FHA fairness requirements are concrete and legible to regulators
+- Positive: No IP concerns — credit risk tooling is a well-established open-source domain
+- Negative: Credit decisioning has established commercial tools (Zest AI, Upstart) — competitive space
 - Mitigation: AgentGuard governs the *agent* performing credit decisions, not the credit model itself — this is a different, less competitive layer
 
 *When you (Claude Code) make a new architectural decision, append it here following the same format. Increment the ADR number sequentially.*
