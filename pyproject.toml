@@ -1,0 +1,130 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "agentguard"
+version = "0.1.0"
+description = "Framework-agnostic agent governance and security runtime for AI agents in regulated industries"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.11"
+keywords = [
+    "ai-agents", "llm", "security", "compliance", "governance",
+    "mcp", "a2a", "fraud-detection", "fintech", "audit",
+    "rbac", "sandbox", "agentic-ai"
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Financial and Insurance Industry",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Security",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "pydantic>=2.0",
+    "structlog>=24.0",
+    "pyyaml>=6.0",
+    "rich>=13.0",
+    "typer>=0.12.0",
+    "httpx>=0.27.0",
+    "anyio>=4.0",
+    "z3-solver>=4.13",
+]
+
+[project.optional-dependencies]
+sandbox = [
+    "docker>=7.0",
+    "wasmtime>=22.0",
+]
+langgraph = [
+    "langgraph>=0.2",
+    "langchain-core>=0.3",
+]
+crewai = [
+    "crewai>=0.80",
+]
+adk = [
+    "google-adk>=0.3",
+]
+finance = [
+    "torch>=2.0",
+    "pandas>=2.0",
+    "scikit-learn>=1.4",
+    "numpy>=1.26",
+    "presidio-analyzer>=2.2",
+    "presidio-anonymizer>=2.2",
+    "aif360>=0.6",          # IBM AI Fairness 360 — disparate impact, equalized odds
+    "fairlearn>=0.10",      # Microsoft Fairlearn — calibration, demographic parity
+]
+observability = [
+    "opentelemetry-sdk>=1.25",
+    "opentelemetry-exporter-otlp>=1.25",
+    "opentelemetry-instrumentation>=0.46b0",
+]
+all = [
+    "agentguard[sandbox,langgraph,crewai,adk,finance,observability]",
+]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "pytest-cov>=5.0",
+    "ruff>=0.4",
+    "mypy>=1.10",
+    "types-pyyaml",
+    "pip-audit>=2.7",
+    "build>=1.2",
+    "hatch>=1.12",
+]
+
+[project.scripts]
+agentguard = "agentguard.cli:app"
+
+[project.urls]
+Homepage = "https://github.com/agentguard/agentguard"
+Documentation = "https://agentguard.readthedocs.io"
+Repository = "https://github.com/agentguard/agentguard"
+"Bug Tracker" = "https://github.com/agentguard/agentguard/issues"
+"HuggingFace" = "https://huggingface.co/agentguard"
+
+[tool.hatch.build.targets.wheel]
+packages = ["agentguard"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "N", "UP", "S", "B", "A", "C4", "PT", "SIM", "TCH", "ARG"]
+ignore = ["S101"]  # assert in tests is fine
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "ARG001", "ARG002"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+ignore_missing_imports = true
+exclude = ["tests/", "examples/"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+addopts = "--cov=agentguard --cov-report=term-missing --cov-fail-under=80"
+markers = [
+    "integration: requires Docker and live services",
+    "red_team: adversarial/escape tests",
+    "slow: takes more than 10 seconds",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise NotImplementedError",
+    "if TYPE_CHECKING:",
+]
