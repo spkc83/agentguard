@@ -1,19 +1,125 @@
-"""AgentGuard CLI entry point."""
+"""AgentGuard CLI -- command-line interface for audit, policy, and verification.
+
+Entry point: `agentguard` (configured in pyproject.toml).
+"""
 
 from __future__ import annotations
 
+import asyncio
+from pathlib import Path
+
 import typer
+from rich.console import Console
+from rich.table import Table
 
-app = typer.Typer(name="agentguard", help="AgentGuard — agent governance and security runtime.")
+from agentguard._logging import configure_logging
+
+app = typer.Typer(
+    name="agentguard",
+    help="Agent governance and security runtime for AI agents.",
+    no_args_is_help=True,
+)
+audit_app = typer.Typer(help="Audit log operations.")
+policy_app = typer.Typer(help="Policy management. (Coming in v0.3.0)")
+verify_app = typer.Typer(help="Formal verification. (Coming in v0.3.0)")
+
+app.add_typer(audit_app, name="audit")
+app.add_typer(policy_app, name="policy")
+app.add_typer(verify_app, name="verify")
+
+console = Console()
 
 
-@app.command()
-def version() -> None:
-    """Print the AgentGuard version."""
-    from agentguard import __version__
+@app.callback()
+def main(
+    json_output: bool = typer.Option(False, "--json", help="Output in JSON format."),
+) -> None:
+    """AgentGuard -- governance runtime for AI agents."""
+    configure_logging(json_output=json_output)
 
-    typer.echo(f"agentguard {__version__}")
+
+@audit_app.command("show")
+def audit_show(
+    log_dir: Path = typer.Option("./audit-logs", help="Audit log directory."),
+    agent_id: str | None = typer.Option(None, help="Filter by agent ID."),
+) -> None:
+    """Show audit log events."""
+    from agentguard.core.audit import FileAuditBackend
+
+    async def _show() -> None:
+        backend = FileAuditBackend(directory=log_dir)
+        events = await backend.read_all()
+
+        if agent_id:
+            events = [e for e in events if e.agent_id == agent_id]
+
+        if not events:
+            console.print("[yellow]No audit events found.[/yellow]")
+            return
+
+        table = Table(title=f"Audit Events ({len(events)} total)")
+        table.add_column("Event ID", style="dim")
+        table.add_column("Timestamp")
+        table.add_column("Agent")
+        table.add_column("Action")
+        table.add_column("Resource")
+        table.add_column("Result", style="bold")
+
+        for event in events:
+            result_style = {
+                "allowed": "green",
+                "denied": "red",
+                "escalated": "yellow",
+                "error": "red bold",
+            }.get(event.result, "white")
+            table.add_row(
+                event.event_id[:12] + "...",
+                event.timestamp.strftime("%Y-%m-%d %H:%M:%S"),
+                event.agent_id[:12] + "...",
+                event.action,
+                event.resource,
+                f"[{result_style}]{event.result}[/{result_style}]",
+            )
+
+        console.print(table)
+
+    asyncio.run(_show())
 
 
-if __name__ == "__main__":
-    app()
+@audit_app.command("verify")
+def audit_verify(
+    log_dir: Path = typer.Option("./audit-logs", help="Audit log directory."),
+) -> None:
+    """Verify audit log HMAC chain integrity."""
+    from agentguard.core.audit import AppendOnlyAuditLog, FileAuditBackend
+    from agentguard.exceptions import AuditTamperDetectedError
+
+    async def _verify() -> None:
+        try:
+            log = AppendOnlyAuditLog(backend=FileAuditBackend(directory=log_dir))
+            result = await log.verify_chain()
+            if result.valid:
+                console.print(
+                    f"[green]Audit chain verified.[/green]"
+                    f" {result.event_count} events, no tampering detected."
+                )
+        except AuditTamperDetectedError as e:
+            console.print(
+                f"[red bold]TAMPER DETECTED[/red bold] at event index {e.event_index} "
+                f"(event_id={e.event_id})"
+            )
+            raise typer.Exit(code=1) from None
+
+    asyncio.run(_verify())
+
+
+@policy_app.command("validate")
+def policy_validate() -> None:
+    """Validate a policy YAML file. (Coming in v0.3.0)"""
+    console.print("[yellow]Policy validation will be available in v0.3.0.[/yellow]")
+
+
+@verify_app.command("rbac")
+def verify_rbac() -> None:
+    """Formally verify RBAC configuration. (Coming in v0.3.0)"""
+    console.print("[yellow]Formal RBAC verification will be available in v0.3.0.[/yellow]")

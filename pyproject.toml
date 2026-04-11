@@ -103,7 +103,9 @@ select = ["E", "W", "F", "I", "N", "UP", "S", "B", "A", "C4", "PT", "SIM", "TCH"
 ignore = ["S101"]  # assert in tests is fine
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**" = ["S101", "ARG001", "ARG002"]
+"tests/**" = ["S101", "ARG001", "ARG002", "TCH003"]
+"agentguard/cli.py" = ["B008", "TCH003"]  # typer.Option() in defaults is canonical; Path needed at runtime
+"examples/**" = ["T201"]  # print() is fine in examples
 
 [tool.mypy]
 python_version = "3.11"
