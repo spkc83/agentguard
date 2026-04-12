@@ -113,6 +113,43 @@ def audit_verify(
     asyncio.run(_verify())
 
 
+@audit_app.command("replay")
+def audit_replay(
+    log_dir: Path = typer.Option("./audit-logs", help="Audit log directory."),
+) -> None:
+    """Replay audit log events sequentially."""
+    from agentguard.core.audit import FileAuditBackend
+
+    async def _replay() -> None:
+        backend = FileAuditBackend(directory=log_dir)
+        events = await backend.read_all()
+
+        if not events:
+            console.print("[yellow]No audit events found.[/yellow]")
+            return
+
+        for i, event in enumerate(events):
+            result_style = {
+                "allowed": "green",
+                "denied": "red",
+                "escalated": "yellow",
+                "error": "red bold",
+            }.get(event.result, "white")
+
+            console.print(f"\n[bold]--- Event {i + 1}/{len(events)} ---[/bold]")
+            console.print(f"  Event ID:  [dim]{event.event_id}[/dim]")
+            console.print(f"  Time:      {event.timestamp.strftime('%Y-%m-%d %H:%M:%S')}")
+            console.print(f"  Agent:     {event.agent_id}")
+            console.print(f"  Action:    {event.action}")
+            console.print(f"  Resource:  {event.resource}")
+            console.print(f"  Result:    [{result_style}]{event.result}[/{result_style}]")
+            console.print(f"  Duration:  {event.duration_ms:.1f}ms")
+            if event.permission_context.reason:
+                console.print(f"  Reason:    {event.permission_context.reason}")
+
+    asyncio.run(_replay())
+
+
 @policy_app.command("validate")
 def policy_validate() -> None:
     """Validate a policy YAML file. (Coming in v0.3.0)"""
