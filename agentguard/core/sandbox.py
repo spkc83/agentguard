@@ -83,7 +83,7 @@ class NoOpSandboxBackend:
                 duration_ms=duration_ms,
                 backend="none",
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             if proc is not None:
                 proc.kill()
             duration_ms = (time.monotonic() - start) * 1000

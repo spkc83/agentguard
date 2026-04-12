@@ -9,9 +9,12 @@ from __future__ import annotations
 import asyncio
 import enum
 import time
-from typing import Any, Awaitable, Callable, TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar
 
 import structlog
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
 
 from agentguard.exceptions import CircuitOpenError, RateLimitExceededError
 
@@ -54,9 +57,11 @@ class CircuitBreaker:
     @property
     def state(self) -> CircuitState:
         """Current circuit breaker state."""
-        if self._state == CircuitState.OPEN:
-            if time.monotonic() - self._last_failure_time >= self._recovery_timeout:
-                return CircuitState.HALF_OPEN
+        if (
+            self._state == CircuitState.OPEN
+            and time.monotonic() - self._last_failure_time >= self._recovery_timeout
+        ):
+            return CircuitState.HALF_OPEN
         return self._state
 
     async def call(self, fn: Callable[..., Awaitable[T]], *args: Any, **kwargs: Any) -> T:
