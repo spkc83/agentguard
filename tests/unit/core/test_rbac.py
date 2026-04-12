@@ -2,8 +2,15 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+import structlog
+
 from agentguard.core.rbac import Permission, RBACEngine, Role
 from agentguard.models import AgentIdentity
+
+if TYPE_CHECKING:
+    import pytest
 
 
 def _identity(roles: list[str]) -> AgentIdentity:
@@ -199,3 +206,29 @@ class TestRBACEngine:
         assert ctx.agent == identity
         assert ctx.requested_action == "tool:credit_check"
         assert ctx.resource == "bureau/experian"
+
+    def test_circular_inheritance_warns(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """Circular role inheritance should log a warning, not crash."""
+        structlog.configure(
+            processors=[
+                structlog.processors.add_log_level,
+                structlog.dev.ConsoleRenderer(),
+            ],
+            wrapper_class=structlog.make_filtering_bound_logger(0),
+            context_class=dict,
+            logger_factory=structlog.PrintLoggerFactory(),
+            cache_logger_on_first_use=False,
+        )
+        role_a = Role(
+            name="role-a",
+            permissions=[Permission(action="tool:a", resource="*", effect="allow")],
+            inherited_roles=["role-b"],
+        )
+        role_b = Role(
+            name="role-b",
+            permissions=[Permission(action="tool:b", resource="*", effect="allow")],
+            inherited_roles=["role-a"],
+        )
+        RBACEngine(roles=[role_a, role_b])
+        captured = capsys.readouterr()
+        assert "circular_role_inheritance" in captured.out

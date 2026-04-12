@@ -66,6 +66,27 @@ class RBACEngine:
 
     def __init__(self, roles: list[Role]) -> None:
         self._roles: dict[str, Role] = {r.name: r for r in roles}
+        self._detect_circular_inheritance()
+
+    def _detect_circular_inheritance(self) -> None:
+        """Log a warning for any circular role inheritance chains."""
+        for role_name in self._roles:
+            visited: set[str] = set()
+            current = role_name
+            stack = [current]
+            while stack:
+                current = stack.pop()
+                if current in visited:
+                    logger.warning(
+                        "circular_role_inheritance",
+                        role=role_name,
+                        cycle_at=current,
+                    )
+                    break
+                visited.add(current)
+                role = self._roles.get(current)
+                if role:
+                    stack.extend(role.inherited_roles)
 
     def _collect_permissions(
         self, role_name: str, visited: set[str] | None = None

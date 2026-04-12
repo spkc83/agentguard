@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from agentguard.core.identity import AgentRegistry
-from agentguard.exceptions import IdentityNotFoundError
+from agentguard.exceptions import DuplicateAgentError, IdentityNotFoundError
 from agentguard.models import AgentIdentity
 
 
@@ -65,3 +65,10 @@ class TestAgentRegistry:
         assert identity.agent_id == "my-custom-id"
         resolved = await registry.resolve("my-custom-id")
         assert resolved.name == "Explicit"
+
+    async def test_duplicate_registration_raises(self) -> None:
+        registry = AgentRegistry()
+        await registry.register(name="First", roles=["readonly"], agent_id="dup-id")
+        with pytest.raises(DuplicateAgentError) as exc_info:
+            await registry.register(name="Second", roles=["readonly"], agent_id="dup-id")
+        assert exc_info.value.agent_id == "dup-id"

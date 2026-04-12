@@ -66,6 +66,14 @@ class IdentityNotFoundError(AgentGuardError):
         super().__init__(f"Agent identity not found: {agent_id}")
 
 
+class DuplicateAgentError(AgentGuardError):
+    """Raised when registering an agent with an ID that already exists."""
+
+    def __init__(self, agent_id: str) -> None:
+        self.agent_id = agent_id
+        super().__init__(f"Agent already registered: {agent_id}")
+
+
 class SandboxError(AgentGuardError):
     """Raised when sandboxed tool execution fails."""
 
