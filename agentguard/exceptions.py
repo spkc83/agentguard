@@ -84,3 +84,12 @@ class CircuitOpenError(AgentGuardError):
     def __init__(self, breaker_name: str) -> None:
         self.breaker_name = breaker_name
         super().__init__(f"Circuit breaker open: {breaker_name}")
+
+
+class RateLimitExceededError(AgentGuardError):
+    """Raised when an agent exceeds its rate limit."""
+
+    def __init__(self, agent_id: str, limit: float) -> None:
+        self.agent_id = agent_id
+        self.limit = limit
+        super().__init__(f"Rate limit exceeded: agent={agent_id} limit={limit} tokens/sec")
