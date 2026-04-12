@@ -64,7 +64,7 @@ agentguard/
 ├── AGENTS.md                    # Claude Code agent role definitions
 ├── ARCHITECTURE.md              # Full architecture reference
 ├── DECISIONS.md                 # Architectural Decision Records (ADRs)
-├── PROJECT_PLAN.md              # 12-month milestone roadmap
+├── PROJECT_PLAN.md              # Milestone roadmap
 ├── pyproject.toml
 ├── README.md
 └── .github/
