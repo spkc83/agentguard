@@ -1,25 +1,24 @@
-# AgentGuard — 12-Month Project Plan
+# AgentGuard — Project Plan
 
-**Commitment:** ~10 hours/week  
-**Philosophy:** Ship early, iterate publicly. Each milestone is a releasable version. HuggingFace and GitHub presence starts at Month 1, not Month 12.
+**Philosophy:** Ship early, iterate publicly. Each milestone is a releasable version. HuggingFace and GitHub presence starts at M1, not M6.
 
 ---
 
 ## Milestone Overview
 
-| Milestone | Version | Target Month | Theme |
-|-----------|---------|-------------|-------|
-| M0 | — | Week 1 | Project scaffolding and first commit |
-| M1 | v0.1.0 | Month 1 | Audit logger + RBAC MVP |
-| M2 | v0.2.0 | Month 3 | Full security runtime + MCP middleware |
-| M3 | v0.3.0 | Month 5 | Compliance engine + policy sets |
-| M4 | v0.4.0 | Month 7 | Financial domain toolkit + synthetic data |
-| M5 | v0.5.0 | Month 9 | Framework integrations (LangGraph, CrewAI, ADK) |
-| M6 | v1.0.0 | Month 12 | Observability, stability, production-ready |
+| Milestone | Version | Theme |
+|-----------|---------|-------|
+| M0 | — | Project scaffolding and first commit |
+| M1 | v0.1.0 | Audit logger + RBAC MVP |
+| M2 | v0.2.0 | Full security runtime + MCP middleware |
+| M3 | v0.3.0 | Compliance engine + policy sets |
+| M4 | v0.4.0 | Financial domain toolkit + synthetic data |
+| M5 | v0.5.0 | Framework integrations (LangGraph, CrewAI, ADK) |
+| M6 | v1.0.0 | Observability, stability, production-ready |
 
 ---
 
-## M0 — Week 1: Project Scaffolding
+## M0 — Project Scaffolding
 **Goal:** First commit live on GitHub. Project is findable, professional, and cloneable.
 
 ### Tasks
@@ -41,12 +40,12 @@
 
 ---
 
-## M1 — Month 1: Audit Logger + RBAC MVP (v0.1.0)
+## M1 — Audit Logger + RBAC MVP (v0.1.0)
 **Goal:** The two most fundamental components work end-to-end. A developer can register an agent identity, define roles, check permissions, and get a tamper-evident audit log.
 
 ### Tasks
 
-**Week 2: Core models and audit logger**
+**Core models and audit logger**
 - [ ] Define shared Pydantic models in `agentguard/models.py`: `AgentIdentity`, `PermissionContext`, `AuditEvent`, `PolicyResult`
 - [ ] Implement `agentguard/core/audit.py`:
   - `AppendOnlyAuditLog` class with file backend
@@ -56,7 +55,7 @@
 - [ ] Unit tests for audit logger: write events, verify chain, detect tampering
 - [ ] `agentguard audit verify` CLI command stub
 
-**Week 3: Identity and RBAC**
+**Identity and RBAC**
 - [ ] Implement `agentguard/core/identity.py`:
   - `AgentRegistry` — in-memory registry for v0.1; file-backed in v0.2
   - `async def register(name, roles, metadata) -> AgentIdentity`
@@ -69,14 +68,14 @@
 - [ ] Unit tests: permission grant, permission deny, deny-override, role inheritance
 - [ ] Integration test: register agent → check permission → write audit event
 
-**Week 4: Polish and release**
+**Polish and release**
 - [ ] Update `README.md` with real code example (5 lines, working)
 - [ ] Write `examples/quickstart.py` — register agent, check permission, show audit log
 - [ ] Add `agentguard audit show --agent-id` CLI command
 - [ ] Publish to PyPI: `pip install agentguard==0.1.0`
 - [ ] Write HuggingFace blog post draft: "AgentGuard: Why AI agents need a security runtime"
 
-**HuggingFace action (Month 1 end):**
+**HuggingFace action:**
 - Push first synthetic dataset: `agentguard/synthetic-credit-applications-v1` (generate with simple SMOTE first; WGAN-GP in M4)
 - Dataset card with full documentation
 - Post to r/MachineLearning, r/LocalLLaMA — "I built a governance middleware for AI agents"
@@ -85,12 +84,12 @@
 
 ---
 
-## M2 — Month 3: Full Security Runtime + MCP Middleware (v0.2.0)
+## M2 — Full Security Runtime + MCP Middleware (v0.2.0)
 **Goal:** Complete Layer 1. A real MCP-based agent is governed end-to-end. Sandbox executes tools in Docker.
 
 ### Tasks
 
-**Month 2, Week 1-2: Circuit breaker + sandbox**
+**Circuit breaker + sandbox**
 - [ ] Implement `agentguard/core/circuit_breaker.py`:
   - `CircuitBreaker` with states: CLOSED, OPEN, HALF_OPEN
   - Configurable failure threshold, timeout, success threshold
@@ -103,7 +102,7 @@
   - `SandboxResult` model with stdout, stderr, exit_code, duration_ms
 - [ ] Red team tests: sandbox escape attempts (network access, file system escape, process spawn)
 
-**Month 2, Week 3-4: MCP middleware + file-backed registry**
+**MCP middleware + file-backed registry**
 - [ ] Implement `agentguard/integrations/mcp_middleware.py`:
   - `GovernedMcpClient` wrapping `mcp.ClientSession`
   - Intercepts `call_tool` → identity resolve → RBAC → policy check → audit → sandbox → execute
@@ -112,7 +111,7 @@
 - [ ] CLI: `agentguard audit replay --log <file>` (basic version)
 - [ ] Integration test: real MCP server + governed client + permission denied scenario + audit log verification
 
-**Month 3: Polish and release**
+**Polish and release**
 - [ ] Performance benchmark: measure governance overhead per tool call (target: < 20ms p99 excluding sandbox)
 - [ ] Docker sandbox integration tests in CI (GH Actions with Docker)
 - [ ] Update README with architecture diagram (ASCII or Mermaid)
@@ -128,12 +127,12 @@
 
 ---
 
-## M3 — Month 5: Compliance Engine + Formal Verifier + Policy Sets (v0.3.0)
+## M3 — Compliance Engine + Formal Verifier + Policy Sets (v0.3.0)
 **Goal:** Complete Layer 2. Agents can be evaluated against OWASP Agentic AI, FINOS AIGF v2.0, and EU AI Act rules. Formal policy verification via Z3 proves safety properties statically. Compliance reports generated.
 
 ### Tasks
 
-**Month 4:**
+**Compliance engine and policies**
 - [ ] Design and document policy YAML schema (JSON Schema validation)
 - [ ] Implement `agentguard/compliance/engine.py`:
   - `PolicyEngine` loads YAML policy files at startup
@@ -144,7 +143,7 @@
 - [ ] Implement `agentguard/compliance/z3_models.py` — Z3 sorts and formula helpers for AgentGuard concepts
 - [ ] Unit tests for each policy rule type
 
-**Month 5:**
+**Formal verifier and HITL**
 - [ ] Implement `agentguard/compliance/formal_verifier.py`:
   - Property 1: RBAC privilege escalation absence (bitvector encoding)
   - Property 2: Policy set consistency (contradiction and dead-rule detection)
@@ -171,12 +170,12 @@
 
 ---
 
-## M4 — Month 7: Credit Risk Domain Toolkit + Synthetic Data (v0.4.0)
+## M4 — Credit Risk Domain Toolkit + Synthetic Data (v0.4.0)
 **Goal:** Complete Layer 3 for credit risk. Credit decisioning agent template works end-to-end with ECOA-compliant adverse action generation. WGAN-GP generates realistic synthetic credit application data. Z3 formally verifies monotonicity and adverse action determinism.
 
 ### Tasks
 
-**Month 6:**
+**Synthetic data and fairness**
 - [ ] Implement `agentguard/domains/finance/synthetic/wgan_gp.py`:
   - Generator and Critic networks (PyTorch, tabular architecture with embedding layers for categorical features)
   - Gradient penalty training loop (λ=10)
@@ -191,7 +190,7 @@
   - Score calibration by group
   - `FairnessReport` Pydantic model
 
-**Month 7:**
+**Credit risk agents and adverse action**
 - [ ] Implement `agentguard/domains/finance/credit_risk/agent_templates.py`:
   - `CreditDecisioningAgent`: AgentGuard-wrapped agent with bureau pull, income verify, PD model, decision tools
   - Configurable PD thresholds (auto-approve/review/decline cutoffs)
@@ -216,12 +215,12 @@
 
 ---
 
-## M5 — Month 9: Framework Integrations (v0.5.0)
+## M5 — Framework Integrations (v0.5.0)
 **Goal:** LangGraph, CrewAI, and Google ADK have official AgentGuard integrations. Developers can add governance to existing agent code with minimal changes.
 
 ### Tasks
 
-**Month 8:**
+**LangGraph and CrewAI integrations**
 - [ ] Implement `agentguard/integrations/langgraph.py`:
   - `@governed_node` decorator for LangGraph nodes
   - `GovernedStateGraph` wrapper for full graph governance
@@ -231,7 +230,7 @@
   - `GovernedCrew` wrapper applying governance to all agents in a crew
   - Example: `examples/crewai_credit_crew.py`
 
-**Month 9:**
+**Google ADK and A2A integrations**
 - [ ] Implement `agentguard/integrations/google_adk.py`:
   - ADK `BaseTool` subclass with governance built in
   - ADK agent runner wrapper
@@ -250,12 +249,12 @@
 
 ---
 
-## M6 — Month 12: Observability + v1.0.0
+## M6 — Observability + v1.0.0
 **Goal:** Production-ready. Observability stack complete. Performance optimized. Documentation complete. Conference talk submitted.
 
 ### Tasks
 
-**Month 10:**
+**Tracing and replay**
 - [ ] Implement `agentguard/observability/tracer.py`:
   - OpenTelemetry SDK integration
   - `agentguard.*` semantic attribute namespace
@@ -265,7 +264,7 @@
   - Step-through with Rich terminal rendering
   - JSON output mode
 
-**Month 11:**
+**Dashboard and optimization**
 - [ ] Implement `agentguard/observability/dashboard.py`:
   - `agentguard dashboard` — Rich terminal dashboard
   - Metrics: tool call volume, permission denials, policy violations, cost, latency
@@ -273,7 +272,7 @@
 - [ ] Performance optimization pass: profile governance overhead; target < 10ms p99 for in-memory path
 - [ ] Security audit: run `pip-audit`, review sandbox escape test suite, HMAC key rotation docs
 
-**Month 12:**
+**Stability and release**
 - [ ] Complete documentation: all public APIs, all policy rules, all integration guides
 - [ ] v1.0.0 stability review: deprecate any unstable APIs, finalize versioning contract
 - [ ] Publish v1.0.0 to PyPI
@@ -285,17 +284,17 @@
 
 ---
 
-## Continuous Activities (Every Month)
+## Continuous Activities
 
 **GitHub community:**
 - Respond to issues within 48 hours
 - Label `good first issue` for onboarding tasks
-- Weekly release notes (even for patch releases)
+- Release notes with each release
 - Maintain `CHANGELOG.md`
 
 **Content and discovery:**
-- Monthly blog post (HuggingFace blog or personal blog cross-posted)
-- Weekly tweet/LinkedIn post on project progress, learnings, or financial AI governance topics
+- Blog posts (HuggingFace blog or personal blog cross-posted) with each milestone
+- Social media posts on project progress, learnings, or financial AI governance topics
 - Engage on r/MachineLearning, r/LocalLLaMA, and AI Engineer Discord
 
 **HuggingFace:**
@@ -307,13 +306,13 @@
 
 ## Success Metrics by Milestone
 
-| Milestone | GitHub Stars | PyPI Downloads/month | HuggingFace Downloads |
-|-----------|-------------|---------------------|----------------------|
-| M1 (Month 1) | 50–200 | 100–500 | 500–2K (dataset) |
-| M2 (Month 3) | 200–800 | 500–2K | 2K–10K |
-| M3 (Month 5) | 500–1,500 | 1K–5K | 5K–20K |
-| M4 (Month 7) | 1,000–2,500 | 2K–10K | 10K–50K |
-| M5 (Month 9) | 2,000–4,000 | 5K–20K | 20K–100K |
-| M6 (Month 12) | 3,000–8,000 | 10K–50K | 50K+ |
+| Milestone | GitHub Stars | PyPI Downloads | HuggingFace Downloads |
+|-----------|-------------|---------------|----------------------|
+| M1 | 50–200 | 100–500 | 500–2K (dataset) |
+| M2 | 200–800 | 500–2K | 2K–10K |
+| M3 | 500–1,500 | 1K–5K | 5K–20K |
+| M4 | 1,000–2,500 | 2K–10K | 10K–50K |
+| M5 | 2,000–4,000 | 5K–20K | 20K–100K |
+| M6 | 3,000–8,000 | 10K–50K | 50K+ |
 
 These are realistic ranges, not targets. A single HN or Reddit frontpage moment can 10x these numbers instantly. The goal is to consistently ship quality and let adoption follow.

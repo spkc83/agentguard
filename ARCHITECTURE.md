@@ -460,7 +460,7 @@ AgentGuard runs as a standalone governance gateway. All agent applications in an
 
 ## Versioning and Stability Contract
 
-- **`agentguard.core.*`**: Stable API — breaking changes require major version bump and 6-month deprecation notice
+- **`agentguard.core.*`**: Stable API — breaking changes require major version bump and deprecation notice
 - **`agentguard.compliance.*`**: Stable API — policy schema changes are backward-compatible within minor versions
 - **`agentguard.domains.*`**: Beta — may change in minor versions; domain modules are versioned independently
 - **`agentguard.integrations.*`**: Beta — tied to upstream framework versions

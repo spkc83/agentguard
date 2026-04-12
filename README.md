@@ -162,7 +162,7 @@ AGENTGUARD_AUDIT_KEY=dev-key pytest tests/ --cov=agentguard --cov-report=term-mi
 
 - [ARCHITECTURE.md](ARCHITECTURE.md) — full architecture reference (4 layers, threat model, deployment patterns)
 - [DECISIONS.md](DECISIONS.md) — architectural decision records (14 ADRs)
-- [PROJECT_PLAN.md](PROJECT_PLAN.md) — 12-month milestone roadmap
+- [PROJECT_PLAN.md](PROJECT_PLAN.md) — milestone roadmap
 - [AGENTS.md](AGENTS.md) — agent role definitions for parallel development
 
 ## License
