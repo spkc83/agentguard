@@ -131,3 +131,24 @@ class TestAppendOnlyAuditLog:
         result = await log.verify_chain()
         assert result.valid is True
         assert result.event_count == 0
+
+    @pytest.mark.usefixtures("_set_audit_key")
+    async def test_chain_survives_restart(self, tmp_audit_dir: Path) -> None:
+        """Simulates process restart: new AppendOnlyAuditLog against existing log."""
+        backend = FileAuditBackend(directory=tmp_audit_dir)
+
+        # Session 1: write 3 events
+        log1 = AppendOnlyAuditLog(backend=backend)
+        for i in range(3):
+            await log1.write(_make_event(event_id=f"s1-{i:03d}"))
+
+        # Session 2: new instance (simulates restart), write 2 more
+        log2 = AppendOnlyAuditLog(backend=backend)
+        for i in range(2):
+            await log2.write(_make_event(event_id=f"s2-{i:03d}"))
+
+        # Verify the full chain is intact across both sessions
+        log3 = AppendOnlyAuditLog(backend=backend)
+        result = await log3.verify_chain()
+        assert result.valid is True
+        assert result.event_count == 5

@@ -85,10 +85,10 @@ dev = [
 agentguard = "agentguard.cli:app"
 
 [project.urls]
-Homepage = "https://github.com/agentguard/agentguard"
+Homepage = "https://github.com/spkc83/agentguard"
 Documentation = "https://agentguard.readthedocs.io"
-Repository = "https://github.com/agentguard/agentguard"
-"Bug Tracker" = "https://github.com/agentguard/agentguard/issues"
+Repository = "https://github.com/spkc83/agentguard"
+"Bug Tracker" = "https://github.com/spkc83/agentguard/issues"
 "HuggingFace" = "https://huggingface.co/agentguard"
 
 [tool.hatch.build.targets.wheel]

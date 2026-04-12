@@ -11,7 +11,7 @@ import uuid
 
 import structlog
 
-from agentguard.exceptions import IdentityNotFoundError
+from agentguard.exceptions import DuplicateAgentError, IdentityNotFoundError
 from agentguard.models import AgentIdentity
 
 logger = structlog.get_logger()
@@ -53,6 +53,8 @@ class AgentRegistry:
         )
 
         async with self._lock:
+            if agent_id in self._agents:
+                raise DuplicateAgentError(agent_id)
             self._agents[agent_id] = identity
 
         logger.info("agent_registered", agent_id=agent_id, name=name, roles=roles)

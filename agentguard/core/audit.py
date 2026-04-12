@@ -101,12 +101,27 @@ class AppendOnlyAuditLog:
         self._key = key.encode("utf-8")
         self._backend = backend
         self._prev_hash = ""
+        self._chain_initialized = False
 
     def _compute_hash(self, event: AuditEvent) -> str:
         """Compute HMAC-SHA256 over event content + prev_hash."""
         data = event.model_copy(update={"event_hash": "", "prev_hash": event.prev_hash})
         payload = data.model_dump_json().encode("utf-8")
         return hmac.new(self._key, payload, hashlib.sha256).hexdigest()
+
+    async def _ensure_chain_initialized(self) -> None:
+        """Restore _prev_hash from the last event on disk, if any."""
+        if self._chain_initialized:
+            return
+        self._chain_initialized = True
+        events = await self._backend.read_all()
+        if events:
+            self._prev_hash = events[-1].event_hash
+            logger.debug(
+                "audit_chain_restored",
+                prev_hash=self._prev_hash,
+                event_count=len(events),
+            )
 
     async def write(self, event: AuditEvent) -> AuditEvent:
         """Write an event to the audit log with HMAC chain linking.
@@ -118,6 +133,7 @@ class AppendOnlyAuditLog:
         Returns:
             The event with event_hash and prev_hash populated.
         """
+        await self._ensure_chain_initialized()
         chained = event.model_copy(update={"prev_hash": self._prev_hash})
         event_hash = self._compute_hash(chained)
         chained = chained.model_copy(update={"event_hash": event_hash})
