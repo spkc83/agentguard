@@ -10,12 +10,12 @@ AgentGuard is an **open-source, framework-agnostic agent governance and security
 agentguard/
 ├── agentguard/                  # Main Python package
 │   ├── __init__.py
-│   ├── core/                    # Layer 1: Security Runtime
+│   ├── core/                    # Layer 1: Security Runtime (v0.2.0 complete)
 │   │   ├── rbac.py              # Role-based access control for agents
 │   │   ├── audit.py             # Immutable audit logger (append-only)
-│   │   ├── sandbox.py           # Sandboxed tool execution (Docker / Wasm)
-│   │   ├── circuit_breaker.py   # Kill switches, rate limiters, breakers
-│   │   └── identity.py          # Agent identity and credential management
+│   │   ├── sandbox.py           # Sandboxed tool execution (Docker + NoOp)
+│   │   ├── circuit_breaker.py   # Circuit breaker + token bucket rate limiter
+│   │   └── identity.py          # Agent identity (in-memory + file-backed)
 │   ├── compliance/              # Layer 2: Compliance Engine
 │   │   ├── engine.py            # Policy-as-code evaluator
 │   │   ├── policies/            # Built-in policy YAML files
@@ -40,17 +40,17 @@ agentguard/
 │   │   ├── tracer.py            # OpenTelemetry-native agent decision traces
 │   │   ├── replay.py            # Tool call replay and debugging
 │   │   └── dashboard.py         # Metrics and cost tracking
-│   ├── integrations/            # Framework adapters
-│   │   ├── mcp_middleware.py    # MCP protocol middleware wrapper
+│   ├── integrations/            # Framework adapters (MCP done in v0.2.0)
+│   │   ├── mcp_middleware.py    # MCP governed client (identity→RBAC→breaker→audit→call)
 │   │   ├── a2a_middleware.py    # A2A protocol middleware wrapper
 │   │   ├── langgraph.py         # LangGraph integration
 │   │   ├── crewai.py            # CrewAI integration
 │   │   └── google_adk.py        # Google ADK integration
 │   └── cli.py                   # `agentguard` CLI entry point
 ├── tests/
-│   ├── unit/
-│   ├── integration/
-│   └── red_team/                # Adversarial test scenarios
+│   ├── unit/                    # Fast unit tests (102 tests, 95% coverage)
+│   ├── integration/             # Docker sandbox integration tests
+│   └── red_team/                # Adversarial sandbox escape tests
 ├── examples/
 │   ├── credit_decisioning/      # End-to-end credit decisioning agent demo
 │   ├── adverse_action_generation/ # Adverse action notice pipeline demo
@@ -63,6 +63,7 @@ agentguard/
 ├── CLAUDE.md                    # ← this file
 ├── AGENTS.md                    # Claude Code agent role definitions
 ├── ARCHITECTURE.md              # Full architecture reference
+├── CONTRIBUTING.md              # Dev setup and contribution guide
 ├── DECISIONS.md                 # Architectural Decision Records (ADRs)
 ├── PROJECT_PLAN.md              # Milestone roadmap
 ├── pyproject.toml

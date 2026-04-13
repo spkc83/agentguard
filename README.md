@@ -6,20 +6,23 @@ AgentGuard sits between your agent orchestration framework (LangGraph, CrewAI, G
 
 Financial services / credit risk is the flagship domain, with built-in support for ECOA adverse action notices, SR 11-7 model validation, and fairness analysis under the Fair Housing Act.
 
-## Current Status: v0.1.0 (Milestone 1)
+## Current Status: v0.2.0 (Milestone 2)
 
-The core security runtime is implemented and tested:
+The full security runtime (Layer 1) is implemented and tested:
 
 | Component | Status | Description |
 |-----------|--------|-------------|
 | Audit Logger | Done | HMAC-SHA256 chained, append-only, tamper-evident JSONL log |
-| Agent Identity | Done | In-memory registry with register, resolve, list |
+| Agent Identity | Done | In-memory and file-backed registries with atomic persistence |
 | RBAC Engine | Done | Deny-override semantics, role inheritance, wildcard matching |
-| CLI | Done | `agentguard audit show` and `agentguard audit verify` |
+| Circuit Breaker | Done | CLOSED/OPEN/HALF_OPEN states + per-agent token bucket rate limiter |
+| Sandbox | Done | Docker container isolation + NoOp backend for dev/testing |
+| MCP Middleware | Done | `GovernedMcpClient` — full governance pipeline for MCP tool calls |
+| CLI | Done | `agentguard audit show`, `verify`, and `replay` commands |
 | Shared Models | Done | Frozen Pydantic v2 contracts for all layers |
 | CI | Done | GitHub Actions: lint, type check, test (Python 3.11 + 3.12) |
 
-**52 tests, 90% coverage.**
+**102 tests, 95% coverage.**
 
 ## Quickstart
 
@@ -89,8 +92,9 @@ Your Agent Application (LangGraph / CrewAI / ADK / Python)
                     v
         AgentGuard Runtime Middleware
         +----------------------------------+
-        | Layer 1: Security Runtime        |  <-- v0.1.0 (current)
-        |   RBAC, Identity, Audit          |
+        | Layer 1: Security Runtime        |  <-- v0.2.0 (current)
+        |   RBAC, Identity, Audit,         |
+        |   Circuit Breaker, Sandbox, MCP  |
         +----------------------------------+
         | Layer 2: Compliance Engine       |  <-- v0.3.0
         |   Policy-as-Code, HITL, Z3      |
@@ -123,6 +127,9 @@ agentguard audit show --log-dir ./audit-logs
 
 # Verify audit chain integrity (detects tampering)
 agentguard audit verify --log-dir ./audit-logs
+
+# Replay audit events sequentially with detailed output
+agentguard audit replay --log-dir ./audit-logs
 ```
 
 ## Roadmap
@@ -130,7 +137,7 @@ agentguard audit verify --log-dir ./audit-logs
 | Milestone | Version | Status | What |
 |-----------|---------|--------|------|
 | M0+M1 | v0.1.0 | **Done** | Audit logger, RBAC, identity, CLI |
-| M2 | v0.2.0 | Planned | Circuit breaker, Docker sandbox, MCP middleware |
+| M2 | v0.2.0 | **Done** | Circuit breaker, Docker sandbox, MCP middleware, file-backed registry |
 | M3 | v0.3.0 | Planned | Compliance engine, Z3 formal verifier, OWASP/FINOS/EU AI Act policies |
 | M4 | v0.4.0 | Planned | Credit risk domain toolkit, WGAN-GP synthetic data, adverse action generator |
 | M5 | v0.5.0 | Planned | LangGraph, CrewAI, Google ADK integrations |
