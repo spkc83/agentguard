@@ -40,9 +40,9 @@ def _build_engine() -> RBACEngine:
 
 
 @pytest.fixture
-def _mcp_setup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[
-    AgentRegistry, RBACEngine, AppendOnlyAuditLog, CircuitBreaker, FakeMcpSession, Path
-]:
+def _mcp_setup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[AgentRegistry, RBACEngine, AppendOnlyAuditLog, CircuitBreaker, FakeMcpSession, Path]:
     monkeypatch.setenv("AGENTGUARD_AUDIT_KEY", "test-key-abc")
     audit_dir = tmp_path / "audit"
     audit_dir.mkdir()

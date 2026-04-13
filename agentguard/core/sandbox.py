@@ -58,9 +58,7 @@ class NoOpSandboxBackend:
     Uses asyncio.create_subprocess_exec (safe, no shell injection).
     """
 
-    async def run(
-        self, command: list[str], config: SandboxConfig | None = None
-    ) -> SandboxResult:
+    async def run(self, command: list[str], config: SandboxConfig | None = None) -> SandboxResult:
         """Run command as a local subprocess."""
         cfg = config or SandboxConfig()
         start = time.monotonic()
@@ -116,9 +114,7 @@ class DockerSandboxBackend:
     def __init__(self, image: str = "python:3.11-slim") -> None:
         self._image = image
 
-    async def run(
-        self, command: list[str], config: SandboxConfig | None = None
-    ) -> SandboxResult:
+    async def run(self, command: list[str], config: SandboxConfig | None = None) -> SandboxResult:
         """Run command in an ephemeral Docker container."""
         cfg = config or SandboxConfig()
         start = time.monotonic()
@@ -143,12 +139,8 @@ class DockerSandboxBackend:
 
             try:
                 exit_status = container.wait(timeout=int(cfg.timeout_seconds))
-                stdout = container.logs(stdout=True, stderr=False).decode(
-                    "utf-8", errors="replace"
-                )
-                stderr = container.logs(stdout=False, stderr=True).decode(
-                    "utf-8", errors="replace"
-                )
+                stdout = container.logs(stdout=True, stderr=False).decode("utf-8", errors="replace")
+                stderr = container.logs(stdout=False, stderr=True).decode("utf-8", errors="replace")
                 exit_code = exit_status.get("StatusCode", 1)
             except Exception:
                 container.kill()

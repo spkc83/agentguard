@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agentguard"
-version = "0.1.0"
+version = "0.2.0"
 description = "Framework-agnostic agent governance and security runtime for AI agents in regulated industries"
 readme = "README.md"
 license = { text = "MIT" }
