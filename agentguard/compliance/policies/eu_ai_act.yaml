@@ -1,0 +1,163 @@
+name: "EU AI Act High-Risk Requirements"
+version: "1.0"
+description: >
+  Policy rules based on EU AI Act requirements for high-risk AI systems.
+  Credit scoring is explicitly classified as High-Risk AI under Annex III, Article 6.
+  Covers Articles 9 (risk management), 10 (data governance), 13 (transparency),
+  14 (human oversight), and 17 (quality management).
+
+rules:
+  - id: EU-AI-ACT-ART9-01
+    name: "Article 9: Risk Management System"
+    severity: critical
+    description: >
+      High-risk AI systems shall have a risk management system established,
+      implemented, documented, and maintained. The system must identify and
+      analyse known and foreseeable risks.
+    check:
+      type: metadata_required
+      required_fields: ["risk_category"]
+    remediation: >
+      Classify agents by risk category in their identity metadata.
+      Document risk assessment for high-risk AI agents.
+    references:
+      - https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=CELEX:32024R1689
+
+  - id: EU-AI-ACT-ART9-02
+    name: "Article 9: Residual Risk Mitigation"
+    severity: high
+    description: >
+      Appropriate risk mitigation measures must be adopted for identified risks.
+      Circuit breakers, rate limiters, and HITL escalation are risk mitigations.
+    check:
+      type: result_required
+      allowed_results: ["allowed", "denied", "escalated"]
+    remediation: >
+      Ensure circuit breakers and HITL escalation are configured for
+      all high-risk AI agent deployments.
+    references:
+      - https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=CELEX:32024R1689
+
+  - id: EU-AI-ACT-ART10-01
+    name: "Article 10: Data Governance"
+    severity: high
+    description: >
+      Training, validation, and testing datasets must be subject to
+      appropriate data governance practices including data quality criteria.
+    check:
+      type: metadata_required
+      required_fields: ["data_source"]
+    remediation: >
+      Document data sources in agent metadata. Implement data quality
+      validation before model inference.
+    references:
+      - https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=CELEX:32024R1689
+
+  - id: EU-AI-ACT-ART10-02
+    name: "Article 10: Bias Examination"
+    severity: critical
+    description: >
+      Datasets must be examined for possible biases that could lead to
+      discriminatory outcomes, especially in credit scoring.
+    check:
+      type: metadata_required
+      required_fields: ["fairness_review_date"]
+    remediation: >
+      Conduct bias audits using disparate impact testing and equalized odds.
+      Document findings in the fairness review metadata field.
+    references:
+      - https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=CELEX:32024R1689
+
+  - id: EU-AI-ACT-ART13-01
+    name: "Article 13: Transparency"
+    severity: high
+    description: >
+      High-risk AI systems must be designed to operate with sufficient
+      transparency for users to interpret outputs appropriately.
+    check:
+      type: permission_required
+      require_granted: true
+    remediation: >
+      Log all agent decisions with full context and reasoning.
+      Generate compliance reports for transparency obligations.
+    references:
+      - https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=CELEX:32024R1689
+
+  - id: EU-AI-ACT-ART13-02
+    name: "Article 13: Instructions for Use"
+    severity: medium
+    description: >
+      Providers must supply instructions for use including the intended purpose,
+      level of accuracy, and known limitations of the AI system.
+    check:
+      type: metadata_required
+      required_fields: ["intended_purpose"]
+    remediation: >
+      Document agent intended purpose in metadata.
+      Maintain accuracy metrics and known limitations.
+    references:
+      - https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=CELEX:32024R1689
+
+  - id: EU-AI-ACT-ART14-01
+    name: "Article 14: Human Oversight"
+    severity: critical
+    description: >
+      High-risk AI systems must be designed to allow effective human oversight.
+      Human operators must be able to intervene, override, or stop the system.
+    check:
+      type: content_scan
+      targets: [action]
+      patterns:
+        - "tool:credit_decision"
+        - "tool:loan_approval"
+        - "tool:risk_assessment"
+    remediation: >
+      Configure HITL escalation for all credit and lending decisions.
+      Ensure human operators can override agent decisions.
+    references:
+      - https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=CELEX:32024R1689
+
+  - id: EU-AI-ACT-ART14-02
+    name: "Article 14: Ability to Override"
+    severity: high
+    description: >
+      Deployers must be able to override or reverse AI system outputs.
+      Agent decisions must not be irrevocable without human review.
+    check:
+      type: result_required
+      allowed_results: ["allowed", "denied", "escalated"]
+    remediation: >
+      Implement decision reversibility mechanisms.
+      Never auto-execute irrevocable actions without HITL approval.
+    references:
+      - https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=CELEX:32024R1689
+
+  - id: EU-AI-ACT-ART17-01
+    name: "Article 17: Quality Management System"
+    severity: high
+    description: >
+      Providers must establish a quality management system including
+      design, development, and post-market monitoring procedures.
+    check:
+      type: metadata_required
+      required_fields: ["model_version"]
+    remediation: >
+      Track model versions in agent metadata. Implement CI/CD quality
+      gates for agent deployments.
+    references:
+      - https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=CELEX:32024R1689
+
+  - id: EU-AI-ACT-ART17-02
+    name: "Article 17: Post-Market Monitoring"
+    severity: medium
+    description: >
+      Providers must establish a post-market monitoring system to collect
+      and analyze data on performance throughout the AI system lifetime.
+    check:
+      type: permission_required
+      require_granted: true
+    remediation: >
+      Implement continuous audit logging and compliance reporting.
+      Monitor model performance metrics (PSI, Gini degradation).
+    references:
+      - https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=CELEX:32024R1689

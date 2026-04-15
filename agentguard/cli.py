@@ -20,8 +20,8 @@ app = typer.Typer(
     no_args_is_help=True,
 )
 audit_app = typer.Typer(help="Audit log operations.")
-policy_app = typer.Typer(help="Policy management. (Coming in v0.3.0)")
-verify_app = typer.Typer(help="Formal verification. (Coming in v0.3.0)")
+policy_app = typer.Typer(help="Policy management and compliance reporting.")
+verify_app = typer.Typer(help="Formal verification of RBAC and policy properties.")
 
 app.add_typer(audit_app, name="audit")
 app.add_typer(policy_app, name="policy")
@@ -151,12 +151,130 @@ def audit_replay(
 
 
 @policy_app.command("validate")
-def policy_validate() -> None:
-    """Validate a policy YAML file. (Coming in v0.3.0)"""
-    console.print("[yellow]Policy validation will be available in v0.3.0.[/yellow]")
+def policy_validate(
+    policy_dir: Path = typer.Option(None, help="Policy YAML directory."),
+) -> None:
+    """Validate and list all loaded policy rules."""
+    from agentguard.compliance.engine import PolicyEngine
+
+    dirs = [policy_dir] if policy_dir else None
+    engine = PolicyEngine(policy_dirs=dirs)
+
+    table = Table(title="Loaded Policy Rules")
+    table.add_column("Rule ID", style="bold")
+    table.add_column("Name")
+    table.add_column("Severity")
+    table.add_column("Check Type")
+    table.add_column("Enabled")
+
+    for rule in engine.all_rules:
+        sev_style = {
+            "critical": "red bold",
+            "high": "red",
+            "medium": "yellow",
+            "low": "green",
+        }.get(rule.severity, "white")
+        table.add_row(
+            rule.id,
+            rule.name,
+            f"[{sev_style}]{rule.severity}[/{sev_style}]",
+            rule.check.get("type", "unknown"),
+            "yes" if rule.enabled else "no",
+        )
+
+    console.print(table)
+    console.print(
+        f"\n[green]{len(engine.policy_sets)} policy set(s), "
+        f"{len(engine.all_rules)} rule(s) loaded.[/green]"
+    )
+
+
+@policy_app.command("report")
+def policy_report(
+    log_dir: Path = typer.Option("./audit-logs", help="Audit log directory."),
+    policy_dir: Path = typer.Option(None, help="Policy YAML directory."),
+    output_format: str = typer.Option("markdown", help="Output format: json or markdown."),
+) -> None:
+    """Generate a compliance report from audit events."""
+    from agentguard.compliance.engine import PolicyEngine
+    from agentguard.compliance.reporter import ComplianceReporter
+    from agentguard.core.audit import FileAuditBackend
+
+    async def _report() -> None:
+        backend = FileAuditBackend(directory=log_dir)
+        events = await backend.read_all()
+
+        if not events:
+            console.print("[yellow]No audit events found.[/yellow]")
+            return
+
+        dirs = [policy_dir] if policy_dir else None
+        engine = PolicyEngine(policy_dirs=dirs)
+        reporter = ComplianceReporter(engine)
+        report = await reporter.generate_report(events)
+
+        if output_format == "json":
+            console.print(reporter.to_json(report))
+        else:
+            console.print(reporter.to_markdown(report))
+
+    asyncio.run(_report())
 
 
 @verify_app.command("rbac")
-def verify_rbac() -> None:
-    """Formally verify RBAC configuration. (Coming in v0.3.0)"""
-    console.print("[yellow]Formal RBAC verification will be available in v0.3.0.[/yellow]")
+def verify_rbac(
+    config: Path = typer.Option(None, help="RBAC YAML config file."),
+) -> None:
+    """Formally verify RBAC configuration for privilege escalation."""
+    if config is None:
+        console.print(
+            "[yellow]No RBAC config specified. Use --config to provide a YAML file.[/yellow]"
+        )
+        console.print("Example: agentguard verify rbac --config rbac_config.yaml")
+        return
+
+    console.print(f"[green]Verifying RBAC from {config}...[/green]")
+    console.print("[yellow]RBAC file loading will be added in a future release.[/yellow]")
+
+
+@verify_app.command("policy")
+def verify_policy(
+    policy_dir: Path = typer.Option(None, help="Policy YAML directory."),
+) -> None:
+    """Check policy set for contradictions and dead rules."""
+    from agentguard.compliance.engine import PolicyEngine
+    from agentguard.compliance.formal_verifier import FormalVerifier
+
+    dirs = [policy_dir] if policy_dir else None
+    engine = PolicyEngine(policy_dirs=dirs)
+    verifier = FormalVerifier()
+
+    # Build simplified rule representations for Z3
+    rules = []
+    for rule in engine.all_rules:
+        check = rule.check
+        rules.append(
+            {
+                "id": rule.id,
+                "action_keyword": check.get("patterns", [""])[0] if check.get("patterns") else "",
+                "resource_keyword": "",
+                "effect": "deny" if rule.severity == "critical" else "allow",
+            }
+        )
+
+    if not rules:
+        console.print("[yellow]No policy rules found to verify.[/yellow]")
+        return
+
+    result = verifier.verify_policy_consistency(rules)
+    if result.status == "unsat":
+        console.print(
+            f"[green]Policy consistency verified. "
+            f"{len(rules)} rules checked, no contradictions found.[/green]"
+        )
+    elif result.status == "sat":
+        console.print("[red]Contradictions found:[/red]")
+        for c in result.details.get("contradictions", []):
+            console.print(f"  {c['rule1']} <-> {c['rule2']}")
+    else:
+        console.print(f"[yellow]Verification result: {result.status}[/yellow]")

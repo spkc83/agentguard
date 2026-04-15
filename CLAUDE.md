@@ -16,26 +16,27 @@ agentguard/
 │   │   ├── sandbox.py           # Sandboxed tool execution (Docker + NoOp)
 │   │   ├── circuit_breaker.py   # Circuit breaker + token bucket rate limiter
 │   │   └── identity.py          # Agent identity (in-memory + file-backed)
-│   ├── compliance/              # Layer 2: Compliance Engine
-│   │   ├── engine.py            # Policy-as-code evaluator
-│   │   ├── policies/            # Built-in policy YAML files
-│   │   │   ├── owasp_agentic.yaml
-│   │   │   ├── finos_aigf_v2.yaml
-│   │   │   └── eu_ai_act.yaml
+│   ├── compliance/              # Layer 2: Compliance Engine (v0.3.0 complete)
+│   │   ├── engine.py            # Policy-as-code evaluator (6 check types)
+│   │   ├── formal_verifier.py   # Z3 SMT verification (RBAC, policy, workflow)
+│   │   ├── z3_models.py         # Z3 formula encodings for AgentGuard concepts
+│   │   ├── policies/            # Built-in policy YAML files (35 rules)
+│   │   │   ├── owasp_agentic.yaml   # OWASP Top 10 for Agentic AI (10 rules)
+│   │   │   ├── finos_aigf_v2.yaml   # FINOS AIGF v2.0 (15 rules)
+│   │   │   └── eu_ai_act.yaml       # EU AI Act high-risk (10 rules)
 │   │   ├── hitl.py              # Human-in-the-loop escalation patterns
-│   │   └── reporter.py          # Compliance attestation report generator
-│   ├── domains/                 # Layer 3: Domain Toolkits
+│   │   └── reporter.py          # Compliance attestation report generator (JSON/Markdown)
+│   ├── domains/                 # Layer 3: Domain Toolkits (v0.4.0 complete)
 │   │   └── finance/
 │   │       ├── credit_risk/
-│   │       │   ├── agent_templates.py   # Credit decisioning agent templates
+│   │       │   ├── agent_templates.py   # Credit decisioning agent (auto/review/decline)
 │   │       │   ├── adverse_action.py    # ECOA/Reg B adverse action notice generation
-│   │       │   ├── model_validation.py  # SR 11-7 model validation agent patterns
-│   │       │   ├── fairness.py          # Disparate impact / equalized odds analysis
-│   │       │   └── red_team.py          # Credit AI adversarial eval suite
+│   │       │   ├── model_validation.py  # SR 11-7 validation workflow + findings
+│   │       │   └── fairness.py          # Disparate impact, equalized odds, calibration
 │   │       ├── synthetic/
-│   │       │   ├── wgan_gp.py           # Wasserstein GAN-GP for tabular credit data
-│   │       │   └── generators.py        # High-level synthetic data API
-│   │       └── pii.py                   # PII detection and masking
+│   │       │   ├── wgan_gp.py           # WGAN-GP for tabular credit data (PyTorch)
+│   │       │   └── generators.py        # Statistical synthetic data generator
+│   │       └── pii.py                   # PII detection and masking (SSN, accounts, etc.)
 │   ├── observability/           # Layer 4: Observability
 │   │   ├── tracer.py            # OpenTelemetry-native agent decision traces
 │   │   ├── replay.py            # Tool call replay and debugging
@@ -48,7 +49,7 @@ agentguard/
 │   │   └── google_adk.py        # Google ADK integration
 │   └── cli.py                   # `agentguard` CLI entry point
 ├── tests/
-│   ├── unit/                    # Fast unit tests (102 tests, 95% coverage)
+│   ├── unit/                    # Fast unit tests (189 tests, 87% coverage)
 │   ├── integration/             # Docker sandbox integration tests
 │   └── red_team/                # Adversarial sandbox escape tests
 ├── examples/
@@ -59,13 +60,12 @@ agentguard/
 │   ├── architecture.md          # Links to ARCHITECTURE.md
 │   ├── compliance/
 │   └── api/
-├── datasets/                    # Synthetic benchmark datasets (HuggingFace-ready)
+├── datasets/                    # Synthetic benchmark datasets
 ├── CLAUDE.md                    # ← this file
 ├── AGENTS.md                    # Claude Code agent role definitions
 ├── ARCHITECTURE.md              # Full architecture reference
 ├── CONTRIBUTING.md              # Dev setup and contribution guide
 ├── DECISIONS.md                 # Architectural Decision Records (ADRs)
-├── PROJECT_PLAN.md              # Milestone roadmap
 ├── pyproject.toml
 ├── README.md
 └── .github/
@@ -234,19 +234,6 @@ The owner has 17 years of finance domain experience. Reference these correctly:
 - Regulatory models require **model documentation** proving properties like monotonicity (higher income → lower default probability)
 - Z3 solver can formally verify these constraints hold across the RBAC and agent policy space
 - Adverse action reason ordering must be deterministic and explainable — formal verification of decision tree properties is directly applicable
-
----
-
-## HuggingFace Integration Points
-
-The project submits to HuggingFace across multiple asset types:
-
-- **`datasets/`** → Push synthetic credit risk datasets to `agentguard/synthetic-credit-risk` on HuggingFace Hub
-- **`spaces/`** → Gradio demo app showing live compliance analysis and formal policy verification (separate repo: `agentguard-demo`)
-- **Package** → Published to PyPI as `agentguard`; discoverable via HuggingFace Hub library search
-- **Blog posts** → Authored under the HuggingFace blog as companion pieces to major releases
-
-When generating synthetic data, use the Wasserstein GAN with gradient penalty (WGAN-GP) in `domains/finance/synthetic/wgan_gp.py`. The architecture uses a TabGAN variant optimized for credit application and loan performance data. Reference the owner's prior work on BiGAN/ALI variants for the encoder architecture. Synthetic credit datasets must include fairness-testing proxies (synthetic demographic features) so users can run disparate impact tests.
 
 ---
 

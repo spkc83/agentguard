@@ -2,8 +2,6 @@
 
 Synthetic benchmark datasets for agent governance and credit risk evaluation.
 
-Datasets will be published to [HuggingFace Hub](https://huggingface.co/agentguard) as they become available.
-
 ## Planned Datasets
 
 | Dataset | Description | Milestone |
@@ -15,9 +13,9 @@ Datasets will be published to [HuggingFace Hub](https://huggingface.co/agentguar
 ## Usage
 
 ```python
-from datasets import load_dataset
+import pandas as pd
 
-ds = load_dataset("agentguard/synthetic-credit-applications-v1")
+df = pd.read_parquet("datasets/synthetic_credit_applications_v1/data.parquet")
 ```
 
 ## Data Ethics

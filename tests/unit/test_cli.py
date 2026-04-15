@@ -53,17 +53,17 @@ def test_audit_verify_empty(tmp_path: Path) -> None:
 
 
 def test_policy_validate() -> None:
-    """Policy validate placeholder."""
+    """Policy validate loads built-in rules and shows table."""
     result = runner.invoke(app, ["policy", "validate"])
     assert result.exit_code == 0
-    assert "v0.3.0" in result.output
+    assert "rule" in result.output.lower()
 
 
 def test_verify_rbac() -> None:
-    """Verify rbac placeholder."""
+    """Verify rbac without config shows usage message."""
     result = runner.invoke(app, ["verify", "rbac"])
     assert result.exit_code == 0
-    assert "v0.3.0" in result.output
+    assert "config" in result.output.lower()
 
 
 def _write_events(log_dir: Path, count: int = 3) -> None:
