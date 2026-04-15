@@ -305,4 +305,42 @@ pip install agentguard[all]         # everything
 - Negative: Credit decisioning has established commercial tools (Zest AI, Upstart) — competitive space
 - Mitigation: AgentGuard governs the *agent* performing credit decisions, not the credit model itself — this is a different, less competitive layer
 
+---
+
+## ADR-015 — YAML policy-as-code with typed check handlers
+**Status:** Accepted
+**Date:** 2026-04-14
+
+**Context:** The compliance engine needs to evaluate audit events against policy rules loaded from YAML files. Rules need different evaluation strategies: some check action patterns, others scan for content, others require metadata fields.
+
+**Decision:** Policy rules define a `check.type` field that dispatches to typed handler methods in the PolicyEngine. Six check types implemented: `action_blocklist`, `resource_pattern`, `content_scan`, `permission_required`, `result_required`, `metadata_required`. New check types can be added by registering a handler in the `_check_handlers` dispatch table.
+
+**Consequences:**
+- Positive: YAML rules are readable by compliance officers, not just engineers
+- Positive: New check types can be added without modifying existing rules
+- Positive: Unknown check types pass safely (no silent failures, no crashes)
+- Negative: Less expressive than a full rule engine (no cross-event correlation)
+- Future: Consider OPA/Rego integration for organizations needing complex multi-condition rules
+
+---
+
+## ADR-016 — Graph reachability for workflow safety verification
+**Status:** Accepted
+**Date:** 2026-04-14
+
+**Context:** The formal verifier needs to prove workflow safety properties: "can a target node be reached from a source without passing through a HITL node?" Z3's Fixedpoint engine (µZ Datalog) was initially considered but proved brittle with uninterpreted sorts across Z3 versions.
+
+**Options considered:**
+1. Z3 Fixedpoint engine (µZ Datalog) — theoretically elegant but API instability across Z3 versions
+2. Z3 Solver with bounded unrolling — works but complex encoding for simple reachability
+3. BFS reachability on pruned graph ← chosen
+
+**Decision:** Remove HITL nodes from the graph, then run BFS from source to target. If target is reachable, the safety property is violated (SAT). Z3 is still used for RBAC bitvector encoding and policy consistency checks where it adds real value. The workflow safety check uses simple graph algorithms where they are more robust.
+
+**Consequences:**
+- Positive: Robust across all Z3 versions; no API compatibility issues
+- Positive: Constant-time for typical agent workflow graphs (small node counts)
+- Negative: Cannot express temporal properties or quantified path constraints
+- Future: Re-evaluate µZ when agent workflow graphs become larger or need richer properties
+
 *When you (Claude Code) make a new architectural decision, append it here following the same format. Increment the ADR number sequentially.*

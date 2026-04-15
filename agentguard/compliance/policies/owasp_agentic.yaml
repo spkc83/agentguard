@@ -1,0 +1,189 @@
+name: "OWASP Top 10 for Agentic AI"
+version: "1.0"
+description: >
+  Policy rules based on the OWASP Top 10 risks for agentic AI systems.
+  Covers prompt injection, data exposure, privilege escalation, and more.
+
+rules:
+  - id: OWASP-AGENT-01
+    name: Prompt Injection Detection
+    severity: critical
+    description: >
+      Detects user-supplied content patterns that could override agent instructions
+      or inject malicious prompts into tool arguments.
+    check:
+      type: content_scan
+      targets: [action, resource, tool_args]
+      patterns:
+        - "ignore previous instructions"
+        - "disregard your system prompt"
+        - "you are now"
+        - "override safety"
+        - "bypass restrictions"
+    remediation: >
+      Sanitize user inputs before interpolation into prompts.
+      Use structured tool schemas with strict validation.
+    references:
+      - https://owasp.org/www-project-top-10-for-large-language-model-applications/
+
+  - id: OWASP-AGENT-02
+    name: Sensitive Data Exposure
+    severity: critical
+    description: >
+      Flags access to resources containing PII, credentials, or other
+      sensitive data categories.
+    check:
+      type: resource_pattern
+      patterns:
+        - ".*pii.*"
+        - ".*credential.*"
+        - ".*secret.*"
+        - ".*password.*"
+        - ".*ssn.*"
+        - ".*token.*"
+    remediation: >
+      Ensure PII masking is applied before data reaches the agent.
+      Use the PII detection module for automated scrubbing.
+    references:
+      - https://owasp.org/www-project-top-10-for-large-language-model-applications/
+
+  - id: OWASP-AGENT-03
+    name: Supply Chain Attack Detection
+    severity: high
+    description: >
+      Detects tool calls to unverified or potentially poisoned external tools.
+    check:
+      type: action_blocklist
+      patterns:
+        - "tool:exec_.*"
+        - "tool:install_.*"
+        - "tool:download_.*"
+    remediation: >
+      Only allow tool calls to pre-approved, verified tool registries.
+      Implement tool signature verification.
+    references:
+      - https://owasp.org/www-project-top-10-for-large-language-model-applications/
+
+  - id: OWASP-AGENT-04
+    name: Privilege Escalation Detection
+    severity: critical
+    description: >
+      Flags attempts to access administrative or elevated-privilege resources.
+    check:
+      type: resource_pattern
+      patterns:
+        - "admin/.*"
+        - "system/.*"
+        - ".*/root/.*"
+        - ".*sudo.*"
+    remediation: >
+      Enforce least-privilege RBAC. No agent should have admin access by default.
+      Use formal verification to prove escalation-absence.
+    references:
+      - https://owasp.org/www-project-top-10-for-large-language-model-applications/
+
+  - id: OWASP-AGENT-05
+    name: Excessive Agency Detection
+    severity: high
+    description: >
+      Detects agents performing actions outside their declared scope,
+      such as write operations by read-only agents.
+    check:
+      type: action_blocklist
+      patterns:
+        - "data:write:.*"
+        - "data:delete:.*"
+        - "tool:modify_.*"
+        - "tool:destroy_.*"
+    remediation: >
+      Restrict agent tool access to the minimum required for the task.
+      Define clear scope boundaries in agent role definitions.
+    references:
+      - https://owasp.org/www-project-top-10-for-large-language-model-applications/
+
+  - id: OWASP-AGENT-06
+    name: Overreliance and Hallucination Guard
+    severity: medium
+    description: >
+      Flags actions that proceed without proper permission validation,
+      indicating potential hallucinated authorization.
+    check:
+      type: permission_required
+      require_granted: true
+    remediation: >
+      All agent actions must pass through RBAC before execution.
+      Never allow agents to self-authorize.
+    references:
+      - https://owasp.org/www-project-top-10-for-large-language-model-applications/
+
+  - id: OWASP-AGENT-07
+    name: Data Poisoning Detection
+    severity: high
+    description: >
+      Flags write operations to training data, model artifacts, or
+      configuration that could poison agent behavior.
+    check:
+      type: resource_pattern
+      patterns:
+        - ".*training.*"
+        - ".*model.*weights.*"
+        - ".*config.*"
+        - ".*policy.*"
+    remediation: >
+      Protect training data and model artifacts with write-restricted RBAC.
+      Require HITL approval for any model or configuration changes.
+    references:
+      - https://owasp.org/www-project-top-10-for-large-language-model-applications/
+
+  - id: OWASP-AGENT-08
+    name: Insecure Plugin Detection
+    severity: high
+    description: >
+      Flags tool calls to unregistered or dynamically loaded plugins
+      that could introduce vulnerabilities.
+    check:
+      type: action_blocklist
+      patterns:
+        - "tool:dynamic_.*"
+        - "tool:plugin_.*"
+        - "tool:load_.*"
+    remediation: >
+      Only load tools from verified registries. Implement tool signature
+      verification and sandbox all tool execution.
+    references:
+      - https://owasp.org/www-project-top-10-for-large-language-model-applications/
+
+  - id: OWASP-AGENT-09
+    name: Insecure Output Handling
+    severity: medium
+    description: >
+      Flags events where tool outputs may contain executable content
+      or injection vectors that are passed downstream.
+    check:
+      type: content_scan
+      targets: [action, resource]
+      patterns:
+        - "javascript:"
+        - "<script"
+        - "shell_injection"
+        - "code_execution"
+    remediation: >
+      Sanitize and validate all tool outputs before passing to downstream
+      consumers. Never allow tool output to be executed as code.
+    references:
+      - https://owasp.org/www-project-top-10-for-large-language-model-applications/
+
+  - id: OWASP-AGENT-10
+    name: Model Denial of Service
+    severity: medium
+    description: >
+      Flags high-frequency or resource-intensive patterns that could
+      indicate a denial-of-service attack against the agent system.
+    check:
+      type: result_required
+      allowed_results: ["allowed", "denied"]
+    remediation: >
+      Use circuit breakers and rate limiters to prevent resource exhaustion.
+      Monitor for anomalous request patterns.
+    references:
+      - https://owasp.org/www-project-top-10-for-large-language-model-applications/

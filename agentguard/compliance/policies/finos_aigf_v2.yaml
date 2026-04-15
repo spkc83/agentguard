@@ -1,0 +1,250 @@
+name: "FINOS AI Governance Framework v2.0"
+version: "2.0"
+description: >
+  Policy rules based on the FINOS AI Governance Framework v2.0.
+  46 risks mapped across Governance, Risk Management, Technology, and Operations.
+  Priority subset: top 15 rules for v0.3.
+
+rules:
+  - id: FINOS-AIGF-001
+    name: Model Risk Management
+    severity: critical
+    description: >
+      AI models used in financial decisions must have documented risk management
+      processes including validation, monitoring, and governance. Maps to SR 11-7.
+    check:
+      type: metadata_required
+      required_fields: ["model_version", "validation_date"]
+    remediation: >
+      Ensure all agents using AI models have model_version and validation_date
+      in their identity metadata. Implement SR 11-7 validation workflows.
+    references:
+      - https://github.com/finos/ai-governance-framework
+
+  - id: FINOS-AIGF-002
+    name: Data Quality and Governance
+    severity: high
+    description: >
+      Data used by AI agents must meet quality standards and have documented
+      lineage. Applies to training data, input data, and reference data.
+    check:
+      type: metadata_required
+      required_fields: ["data_source"]
+    remediation: >
+      Document data sources in agent metadata. Implement data quality checks
+      before model inference.
+    references:
+      - https://github.com/finos/ai-governance-framework
+
+  - id: FINOS-AIGF-003
+    name: Explainability and Transparency
+    severity: high
+    description: >
+      AI-driven decisions must be explainable. Agents must log the reasoning
+      behind significant decisions including adverse actions.
+    check:
+      type: result_required
+      allowed_results: ["allowed", "denied", "escalated"]
+    remediation: >
+      Ensure all agent decisions are logged with full permission context
+      and reasoning. Error results indicate unexplained failures.
+    references:
+      - https://github.com/finos/ai-governance-framework
+
+  - id: FINOS-AIGF-004
+    name: Fairness and Bias
+    severity: critical
+    description: >
+      AI models must be regularly tested for bias and discriminatory outcomes,
+      particularly in credit and lending decisions.
+    check:
+      type: metadata_required
+      required_fields: ["fairness_review_date"]
+    remediation: >
+      Conduct regular fairness analysis using disparate impact testing,
+      equalized odds, and calibration metrics. Document results.
+    references:
+      - https://github.com/finos/ai-governance-framework
+
+  - id: FINOS-AIGF-005
+    name: Human Oversight
+    severity: critical
+    description: >
+      High-risk AI decisions must have human oversight mechanisms in place.
+      Credit decisions above materiality thresholds require HITL review.
+    check:
+      type: content_scan
+      targets: [action]
+      patterns:
+        - "tool:credit_decision"
+        - "tool:loan_approval"
+        - "tool:account_closure"
+    remediation: >
+      Configure HITL escalation for credit decisions.
+      Auto-approve should only be used in development environments.
+    references:
+      - https://github.com/finos/ai-governance-framework
+
+  - id: FINOS-AIGF-008
+    name: Operational Resilience
+    severity: high
+    description: >
+      AI agent systems must have circuit breakers, fallback mechanisms,
+      and graceful degradation to ensure operational resilience.
+    check:
+      type: result_required
+      allowed_results: ["allowed", "denied", "escalated"]
+    remediation: >
+      Deploy circuit breakers for all downstream tool calls.
+      Implement rate limiting per agent identity.
+    references:
+      - https://github.com/finos/ai-governance-framework
+
+  - id: FINOS-AIGF-010
+    name: Audit Trail Completeness
+    severity: critical
+    description: >
+      All AI agent actions must be captured in a tamper-evident audit trail.
+      This is a foundational requirement for regulatory compliance.
+    check:
+      type: permission_required
+      require_granted: true
+    remediation: >
+      Ensure the audit log captures every action with full context.
+      Use HMAC-chained logs for tamper evidence.
+    references:
+      - https://github.com/finos/ai-governance-framework
+
+  - id: FINOS-AIGF-012
+    name: Third-Party Risk
+    severity: high
+    description: >
+      External API calls and third-party tool usage must be monitored
+      and subject to governance controls.
+    check:
+      type: resource_pattern
+      patterns:
+        - "external/.*"
+        - "api/.*"
+        - "vendor/.*"
+    remediation: >
+      Apply RBAC and audit logging to all external API calls.
+      Maintain a registry of approved third-party services.
+    references:
+      - https://github.com/finos/ai-governance-framework
+
+  - id: FINOS-AIGF-015
+    name: Privacy and Data Protection
+    severity: critical
+    description: >
+      PII and sensitive financial data must be protected throughout
+      the agent processing pipeline. FCRA and GLBA requirements apply.
+    check:
+      type: resource_pattern
+      patterns:
+        - ".*pii.*"
+        - ".*ssn.*"
+        - ".*account_number.*"
+        - ".*credit_report.*"
+    remediation: >
+      Apply PII detection and masking before data enters the agent pipeline.
+      Log only masked versions of sensitive data.
+    references:
+      - https://github.com/finos/ai-governance-framework
+
+  - id: FINOS-AIGF-018
+    name: Model Validation
+    severity: high
+    description: >
+      Models must undergo independent validation per SR 11-7 guidance
+      before deployment and on a regular ongoing basis.
+    check:
+      type: metadata_required
+      required_fields: ["model_version"]
+    remediation: >
+      Track model versions in agent metadata. Implement the SR 11-7
+      model validation agent workflow.
+    references:
+      - https://github.com/finos/ai-governance-framework
+
+  - id: FINOS-AIGF-022
+    name: Concentration Risk
+    severity: medium
+    description: >
+      Over-reliance on a single AI model, vendor, or data source
+      creates systemic risk. Monitor for concentration.
+    check:
+      type: metadata_required
+      required_fields: ["model_provider"]
+    remediation: >
+      Document model providers in agent metadata. Establish backup
+      models and alternative data sources.
+    references:
+      - https://github.com/finos/ai-governance-framework
+
+  - id: FINOS-AIGF-025
+    name: Change Management
+    severity: medium
+    description: >
+      Changes to AI agent configurations, policies, and models must
+      follow documented change management procedures.
+    check:
+      type: action_blocklist
+      patterns:
+        - "config:update.*"
+        - "policy:modify.*"
+        - "model:deploy.*"
+    remediation: >
+      Route configuration and policy changes through HITL approval.
+      Maintain change logs and rollback capabilities.
+    references:
+      - https://github.com/finos/ai-governance-framework
+
+  - id: FINOS-AIGF-030
+    name: Incident Management
+    severity: high
+    description: >
+      AI agent errors and failures must be detected, logged, and
+      escalated according to incident management procedures.
+    check:
+      type: result_required
+      allowed_results: ["allowed", "denied", "escalated"]
+    remediation: >
+      Configure alerting for error results. Establish incident response
+      procedures for AI agent failures.
+    references:
+      - https://github.com/finos/ai-governance-framework
+
+  - id: FINOS-AIGF-035
+    name: Regulatory Reporting
+    severity: high
+    description: >
+      AI governance metrics must be reportable to regulators on demand.
+      Compliance reports must be generated from audit trails.
+    check:
+      type: permission_required
+      require_granted: true
+    remediation: >
+      Use the ComplianceReporter to generate attestation reports.
+      Maintain audit trails sufficient for regulatory examination.
+    references:
+      - https://github.com/finos/ai-governance-framework
+
+  - id: FINOS-AIGF-040
+    name: Ethical AI Use
+    severity: medium
+    description: >
+      AI agents must operate within ethical boundaries defined by
+      the organization's AI ethics policy.
+    check:
+      type: content_scan
+      targets: [action, resource]
+      patterns:
+        - "discriminat"
+        - "manipulat"
+        - "deceiv"
+    remediation: >
+      Establish AI ethics guidelines and encode them as policy rules.
+      Regular ethics reviews of agent behavior.
+    references:
+      - https://github.com/finos/ai-governance-framework
