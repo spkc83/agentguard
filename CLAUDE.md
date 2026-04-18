@@ -37,19 +37,20 @@ agentguard/
 │   │       │   ├── wgan_gp.py           # WGAN-GP for tabular credit data (PyTorch)
 │   │       │   └── generators.py        # Statistical synthetic data generator
 │   │       └── pii.py                   # PII detection and masking (SSN, accounts, etc.)
-│   ├── observability/           # Layer 4: Observability
-│   │   ├── tracer.py            # OpenTelemetry-native agent decision traces
-│   │   ├── replay.py            # Tool call replay and debugging
-│   │   └── dashboard.py         # Metrics and cost tracking
-│   ├── integrations/            # Framework adapters (MCP done in v0.2.0)
+│   ├── observability/           # Layer 4: Observability (v1.0.0 complete)
+│   │   ├── tracer.py            # OTel-native agent decision traces (NoOp fallback)
+│   │   ├── replay.py            # Audit log replay debugger (filter, timeline, summarize)
+│   │   └── dashboard.py         # Aggregate metrics (denial rates, latency, policy trends)
+│   ├── integrations/            # Framework adapters (v0.5.0 complete)
+│   │   ├── _pipeline.py         # Shared governance pipeline (ADR-020) — used by all adapters
 │   │   ├── mcp_middleware.py    # MCP governed client (identity→RBAC→breaker→audit→call)
-│   │   ├── a2a_middleware.py    # A2A protocol middleware wrapper
-│   │   ├── langgraph.py         # LangGraph integration
-│   │   ├── crewai.py            # CrewAI integration
-│   │   └── google_adk.py        # Google ADK integration
+│   │   ├── a2a_middleware.py    # A2A governed agent-to-agent messaging
+│   │   ├── langgraph.py         # GovernedLangGraphToolNode — governed tool node
+│   │   ├── crewai.py            # GovernedCrewAITool — governed CrewAI tool wrapper
+│   │   └── google_adk.py        # GovernedAdkTool — governed ADK tool wrapper
 │   └── cli.py                   # `agentguard` CLI entry point
 ├── tests/
-│   ├── unit/                    # Fast unit tests (189 tests, 87% coverage)
+│   ├── unit/                    # Fast unit tests (267 tests, 90% coverage)
 │   ├── integration/             # Docker sandbox integration tests
 │   └── red_team/                # Adversarial sandbox escape tests
 ├── examples/

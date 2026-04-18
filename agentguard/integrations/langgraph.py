@@ -1,10 +1,20 @@
-"""MCP middleware — governs MCP tool calls through the AgentGuard runtime.
+"""LangGraph integration — governed tool execution for LangGraph agents.
 
-Wraps an MCP ClientSession (or any object with an async ``call_tool`` method)
-and intercepts every tool call with the full governance pipeline:
+Wraps LangGraph tool nodes so every tool call passes through AgentGuard's
+governance pipeline: identity -> RBAC -> circuit breaker -> audit -> execute
+(with error event logging on failure).
 
-    identity -> RBAC -> audit (pre) -> circuit breaker -> call
-              -> audit (on error, if the call raises)
+Usage:
+    from agentguard.integrations.langgraph import GovernedLangGraphToolNode
+
+    governed = GovernedLangGraphToolNode(
+        tools=[my_tool],
+        agent_id=agent.agent_id,
+        registry=registry,
+        rbac_engine=engine,
+        audit_log=audit,
+    )
+    result = await governed.ainvoke("tool_name", input_data)
 """
 
 from __future__ import annotations
@@ -26,21 +36,23 @@ logger = structlog.get_logger()
 
 
 @runtime_checkable
-class McpSession(Protocol):
-    """Minimal MCP session interface — must have an async call_tool method."""
+class LangChainTool(Protocol):
+    """Minimal interface for a LangChain/LangGraph tool."""
 
-    async def call_tool(self, tool_name: str, arguments: dict[str, Any]) -> Any: ...
+    name: str
+
+    async def ainvoke(self, input: Any) -> Any: ...  # noqa: A002
 
 
-class GovernedMcpClient:
-    """Governance-wrapped MCP client.
+class GovernedLangGraphToolNode:
+    """Governance-wrapped LangGraph tool node.
 
-    Drop-in layer between your agent and an MCP session. Every tool call
-    goes through identity resolution, RBAC, circuit breaker, and audit
-    logging before reaching the actual MCP server.
+    Drop-in replacement for LangGraph's ToolNode. Routes tool calls
+    through the AgentGuard governance pipeline before execution.
 
     Args:
-        session: MCP ClientSession (or any object with async ``call_tool``).
+        tools: List of LangChain-compatible tools (each with ``name`` and
+            async ``ainvoke``).
         agent_id: The calling agent's registered ID.
         registry: Agent identity registry.
         rbac_engine: RBAC permission checker.
@@ -51,7 +63,7 @@ class GovernedMcpClient:
 
     def __init__(
         self,
-        session: Any,
+        tools: list[Any],
         agent_id: str,
         registry: AgentRegistry,
         rbac_engine: RBACEngine,
@@ -59,7 +71,7 @@ class GovernedMcpClient:
         circuit_breaker: CircuitBreaker | None = None,
         tracer: AgentTracer | None = None,
     ) -> None:
-        self._session = session
+        self._tools: dict[str, Any] = {t.name: t for t in tools}
         self._agent_id = agent_id
         self._registry = registry
         self._rbac = rbac_engine
@@ -67,32 +79,30 @@ class GovernedMcpClient:
         self._breaker = circuit_breaker
         self._tracer = tracer
 
-    async def call_tool(
-        self,
-        tool_name: str,
-        arguments: dict[str, Any] | None = None,
-        resource: str = "*",
-    ) -> Any:
-        """Run a governed MCP tool call.
+    async def ainvoke(self, tool_name: str, tool_input: Any, resource: str = "*") -> Any:
+        """Execute a governed tool call.
 
         Args:
-            tool_name: Name of the MCP tool to call.
-            arguments: Tool arguments.
-            resource: Resource pattern for RBAC check (defaults to ``"*"``).
+            tool_name: Name of the tool to call.
+            tool_input: Input to pass to the tool.
+            resource: Resource pattern for RBAC check.
 
         Returns:
-            The tool result from the MCP session.
+            The tool result.
 
         Raises:
+            KeyError: If the tool is not registered.
             PermissionDeniedError: If RBAC denies the action.
-            CircuitOpenError: If the circuit breaker is open.
-            Exception: Re-raised from the MCP session on call failure (after
+            Exception: Re-raised from the tool on execution failure (after
                 logging an ``error`` audit event).
         """
-        arguments = arguments or {}
+        if tool_name not in self._tools:
+            raise KeyError(f"Tool not found: {tool_name}")
+
+        tool = self._tools[tool_name]
 
         async def _execute() -> Any:
-            return await self._session.call_tool(tool_name, arguments)
+            return await tool.ainvoke(tool_input)
 
         return await run_governed(
             agent_id=self._agent_id,

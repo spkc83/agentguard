@@ -6,9 +6,9 @@ AgentGuard sits between your agent orchestration framework (LangGraph, CrewAI, G
 
 Financial services / credit risk is the flagship domain, with built-in support for ECOA adverse action notices, SR 11-7 model validation, and fairness analysis under the Fair Housing Act.
 
-## Current Status: v0.4.0 (Milestone 4)
+## Current Status: v1.0.0 (Production Release)
 
-Layers 1-3 are implemented and tested:
+All 4 layers are implemented and tested:
 
 | Component | Layer | Status | Description |
 |-----------|-------|--------|-------------|
@@ -31,10 +31,17 @@ Layers 1-3 are implemented and tested:
 | Fairness Analysis | 3 | Done | Disparate impact (4/5ths rule), equalized odds, calibration |
 | PII Detection | 3 | Done | SSN, account numbers, email, phone masking |
 | Synthetic Data | 3 | Done | Statistical generator + WGAN-GP (PyTorch) for credit data |
+| LangGraph Integration | 4 | Done | `GovernedLangGraphToolNode` — governed tool execution |
+| CrewAI Integration | 4 | Done | `GovernedCrewAITool` — governed CrewAI tool wrapper |
+| Google ADK Integration | 4 | Done | `GovernedAdkTool` — governed ADK tool wrapper |
+| A2A Middleware | 4 | Done | `GovernedA2AClient` — governed agent-to-agent messaging |
+| OTel Tracer | 4 | Done | OpenTelemetry-native agent decision traces with NoOp fallback |
+| Replay Debugger | 4 | Done | Audit log replay with filtering, timeline, and summarization |
+| Metrics Dashboard | 4 | Done | Denial rates, latency percentiles, agent activity, policy trends |
 | CLI | All | Done | `audit show/verify/replay`, `policy validate/report`, `verify rbac/policy` |
 | CI | All | Done | GitHub Actions: lint, type check, test (Python 3.11 + 3.12) |
 
-**189 tests, 87% coverage.**
+**267 tests, 90% coverage.**
 
 ## Quickstart
 
@@ -112,11 +119,12 @@ Your Agent Application (LangGraph / CrewAI / ADK / Python)
         |   Policy-as-Code, HITL, Z3,     |
         |   OWASP, FINOS, EU AI Act       |
         +----------------------------------+
-        | Layer 3: Domain Toolkit          |  v0.4.0 Done (current)
+        | Layer 3: Domain Toolkit          |  v0.4.0 Done
         |   Credit Risk, Adverse Action,   |
         |   Fairness, PII, Synthetic Data  |
         +----------------------------------+
-        | Layer 4: Observability           |  v1.0.0
+        | Layer 4: Integrations + Observe  |  v1.0.0 Done (current)
+        |   LangGraph, CrewAI, ADK, A2A,  |
         |   OTel Traces, Replay, Metrics  |
         +----------------------------------+
                     |
@@ -148,6 +156,12 @@ agentguard policy report --log-dir ./audit-logs  # Generate compliance report
 # Formal verification
 agentguard verify policy                      # Check policy consistency via Z3
 agentguard verify rbac --config rbac.yaml     # Verify RBAC escalation absence
+
+# Observability (v1.0)
+agentguard observe dashboard --log-dir ./audit-logs  # Aggregate metrics (JSON/Markdown)
+agentguard observe replay    --log-dir ./audit-logs \
+  --agent-id <uuid> --result denied           # Filtered replay with decision summaries
+agentguard observe summary   --log-dir ./audit-logs  # Quick counts by result/agent/action
 ```
 
 ## Roadmap
@@ -158,8 +172,8 @@ agentguard verify rbac --config rbac.yaml     # Verify RBAC escalation absence
 | M2 | v0.2.0 | **Done** | Circuit breaker, Docker sandbox, MCP middleware, file-backed registry |
 | M3 | v0.3.0 | **Done** | Compliance engine, Z3 formal verifier, OWASP/FINOS/EU AI Act policies |
 | M4 | v0.4.0 | **Done** | Credit risk domain toolkit, synthetic data, adverse action, fairness |
-| M5 | v0.5.0 | Planned | LangGraph, CrewAI, Google ADK integrations |
-| M6 | v1.0.0 | Planned | Observability (OTel), replay debugger, production-ready release |
+| M5 | v0.5.0 | **Done** | LangGraph, CrewAI, Google ADK, A2A integrations |
+| M6 | v1.0.0 | **Done** | Observability (OTel tracer, replay debugger, metrics dashboard) |
 
 ## Development
 
@@ -184,7 +198,7 @@ AGENTGUARD_AUDIT_KEY=dev-key pytest tests/ --cov=agentguard --cov-report=term-mi
 ## Project Documentation
 
 - [ARCHITECTURE.md](ARCHITECTURE.md) — full architecture reference (4 layers, threat model, deployment patterns)
-- [DECISIONS.md](DECISIONS.md) — architectural decision records (16 ADRs)
+- [DECISIONS.md](DECISIONS.md) — architectural decision records (20 ADRs)
 - [AGENTS.md](AGENTS.md) — agent role definitions for parallel development
 
 ## License

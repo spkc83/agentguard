@@ -368,6 +368,16 @@ FCRA-regulated data (credit report contents, tradeline details) is treated as Ca
 
 ## Layer 4: Observability
 
+Layer 4 provides three complementary surfaces that all read from the same
+audit log so there is no second source of truth:
+
+1. **`AgentTracer`** — OpenTelemetry spans emitted during the governance
+   pipeline (live, real-time).
+2. **`ReplayDebugger`** — filter and reconstruct historical audit events
+   into decision timelines (post-hoc, offline).
+3. **`MetricsDashboard`** — aggregate KPIs (denial rate, latency
+   percentiles, per-agent activity, policy violation trends).
+
 ### OpenTelemetry Semantic Conventions
 
 AgentGuard defines custom span attributes under the `agentguard.*` namespace:
@@ -389,42 +399,98 @@ agentguard.hitl.required         bool
 agentguard.hitl.approved         bool
 ```
 
+`AgentTracer` is lazily imported — if `opentelemetry-sdk` is not installed,
+all spans become no-ops and the governance pipeline runs with zero
+observability overhead. Integration adapters accept an optional `tracer`
+parameter and automatically wrap the full pipeline (identity → RBAC →
+audit → execute) in a single span named `agentguard.tool_call`.
+
 ### Audit Replay
 
-The replay debugger takes an audit log file and recreates agent execution step-by-step:
+The replay debugger takes audit log events and produces a filtered decision
+timeline:
 
 ```bash
-agentguard audit replay --log audit-2026-04-08.jsonl --agent-id <uuid> --step
+agentguard observe replay --log-dir ./audit-logs --agent-id <uuid> --result denied
+agentguard observe replay --log-dir ./audit-logs --start-time 2026-04-10T00:00:00+00:00
 ```
 
-Step-through mode pauses after each event, shows the policy evaluation results, and allows the operator to inspect the full permission context. Non-interactive mode outputs a structured replay report.
+Each timeline entry reports the agent, action, resource, governance
+decision, and warning flags (`denied`, `error`, `escalated`,
+`policy_violation`). Events are sorted by timestamp and linked back to the
+original `AuditEvent` for full inspection.
+
+### Metrics Dashboard
+
+`MetricsDashboard.compute(events)` aggregates KPIs over any slice of the
+audit log. Output is available as a structured `DashboardMetrics` model,
+JSON (via `to_json`), or Markdown table (via `to_markdown`):
+
+```bash
+agentguard observe dashboard --log-dir ./audit-logs --output-format markdown
+agentguard observe summary --log-dir ./audit-logs
+```
+
+Latency percentiles (p50/p95/p99) are computed only for events with a
+positive `duration_ms` — integration adapters currently emit that field
+only on error events (per ADR-004), so production latency metrics should
+be sourced from OTel spans rather than pre-event audit records.
 
 ---
 
 ## Protocol Integration Design
 
-### MCP Middleware
+All framework adapters route tool calls through a **shared governance
+pipeline** (`agentguard.integrations._pipeline.run_governed`) so behavior
+is identical across MCP, LangGraph, CrewAI, Google ADK, and A2A:
 
-AgentGuard wraps MCP tool calls at the `call_tool` boundary:
-
-```python
-# Original MCP call (unguarded):
-result = await mcp_client.call_tool("web_search", {"query": "..."})
-
-# AgentGuard-wrapped:
-async with AgentGuard.mcp_context(agent_id="credit-agent-1") as guard:
-    result = await guard.call_tool("web_search", {"query": "..."})
-    # Internally: identity → RBAC → policy → audit → sandbox → execute → return
+```
+resolve identity -> RBAC check -> audit (allowed, pre)
+                 -> circuit breaker -> executor
+                 -> audit (error, on failure)  (ADR-004)
 ```
 
-The MCP middleware intercepts at the transport layer — it wraps the `ClientSession.call_tool` method rather than modifying tool definitions.
+Adapters are thin — they build the executor callable for their framework
+and delegate everything else to the shared pipeline. New frameworks can be
+supported by writing a ~30-line adapter that constructs an executor lambda.
 
-### A2A Middleware
+### MCP Middleware (`GovernedMcpClient`)
 
-Agent-to-agent messages in A2A are governed at the `message_send` boundary. Each agent-to-agent communication requires:
-1. The sending agent has `a2a:send` permission to the receiving agent's identity
-2. The message content is scanned for prompt injection patterns
-3. The communication is logged with both agent identities in the audit event
+Wraps an MCP `ClientSession` at the `call_tool` boundary:
+
+```python
+from agentguard.integrations import GovernedMcpClient
+
+client = GovernedMcpClient(
+    session=mcp_session,
+    agent_id=agent.agent_id,
+    registry=registry, rbac_engine=engine, audit_log=audit,
+)
+result = await client.call_tool("web_search", {"query": "..."})
+```
+
+### LangGraph Integration (`GovernedLangGraphToolNode`)
+
+Drop-in replacement for LangGraph's `ToolNode`. Exposes `ainvoke(tool_name,
+input, resource)` and routes through the governance pipeline.
+
+### CrewAI Integration (`GovernedCrewAITool`)
+
+Wraps a CrewAI tool (sync `_run` method) so invocations go through the
+governance pipeline. The wrapper exposes an async `run(*args, **kwargs)`;
+callers can override the RBAC resource per-call via `_resource=...`.
+
+### Google ADK Integration (`GovernedAdkTool`)
+
+Wraps an ADK tool's `run_async(args, tool_context)` method. Resource
+pattern can be set per-instance or overridden per-call.
+
+### A2A Middleware (`GovernedA2AClient`)
+
+Agent-to-agent messages are governed at the `send_message` boundary.
+Actions are encoded as `a2a:send:<target_agent>` with resource
+`agent/<target_agent>` so RBAC can allow/deny specific agent-to-agent
+relationships.
 
 ---
 
@@ -463,5 +529,5 @@ AgentGuard runs as a standalone governance gateway. All agent applications in an
 - **`agentguard.core.*`**: Stable API — breaking changes require major version bump and deprecation notice
 - **`agentguard.compliance.*`**: Stable API — policy schema changes are backward-compatible within minor versions
 - **`agentguard.domains.*`**: Beta — may change in minor versions; domain modules are versioned independently
-- **`agentguard.integrations.*`**: Beta — tied to upstream framework versions
-- **`agentguard.observability.*`**: Alpha in v0.x; stable in v1.0
+- **`agentguard.integrations.*`**: Stable in v1.0 — public adapter classes and constructor signatures are frozen. The ``_pipeline`` helper is private.
+- **`agentguard.observability.*`**: Stable in v1.0 — `AgentTracer`, `ReplayDebugger`, and `MetricsDashboard` APIs are frozen.
