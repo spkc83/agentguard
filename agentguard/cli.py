@@ -31,6 +31,7 @@ def _parse_iso_utc(value: str | None) -> datetime | None:
         parsed = parsed.replace(tzinfo=UTC)
     return parsed
 
+
 app = typer.Typer(
     name="agentguard",
     help="Agent governance and security runtime for AI agents.",

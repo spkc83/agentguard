@@ -99,9 +99,7 @@ async def main() -> None:
     print(f"1. credit_check result: {result}")  # noqa: T201
 
     # 2. Allowed call (model scoring)
-    result = await governed.ainvoke(
-        "score_model", {"features": [720, 0.3]}, resource="model/pd_v1"
-    )
+    result = await governed.ainvoke("score_model", {"features": [720, 0.3]}, resource="model/pd_v1")
     print(f"2. score_model result: {result}")  # noqa: T201
 
     # 3. Denied call — RBAC deny-override
@@ -112,9 +110,7 @@ async def main() -> None:
 
     # 4. Allowed call that fails downstream — error event is logged
     try:
-        await governed.ainvoke(
-            "unreliable_api", {"payload": 1}, resource="bureau/unreliable"
-        )
+        await governed.ainvoke("unreliable_api", {"payload": 1}, resource="bureau/unreliable")
     except RuntimeError as exc:
         print(f"4. unreliable_api errored: {exc}")  # noqa: T201
 

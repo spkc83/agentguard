@@ -48,9 +48,7 @@ def _pipeline_setup(
 
 
 class TestPipeline:
-    async def test_success_path_writes_one_allowed_event(
-        self, _pipeline_setup: Any
-    ) -> None:
+    async def test_success_path_writes_one_allowed_event(self, _pipeline_setup: Any) -> None:
         registry, engine, audit, audit_dir = _pipeline_setup
         agent = await registry.register(name="Bot", roles=["user"])
         executor = AsyncMock(return_value="ok")
@@ -69,9 +67,7 @@ class TestPipeline:
         assert len(events) == 1
         assert events[0].result == "allowed"
 
-    async def test_deny_path_writes_denied_event_and_raises(
-        self, _pipeline_setup: Any
-    ) -> None:
+    async def test_deny_path_writes_denied_event_and_raises(self, _pipeline_setup: Any) -> None:
         registry, engine, audit, audit_dir = _pipeline_setup
         agent = await registry.register(name="Bot", roles=["user"])
         executor = AsyncMock(return_value="ok")
@@ -91,9 +87,7 @@ class TestPipeline:
         assert len(events) == 1
         assert events[0].result == "denied"
 
-    async def test_executor_exception_writes_error_event(
-        self, _pipeline_setup: Any
-    ) -> None:
+    async def test_executor_exception_writes_error_event(self, _pipeline_setup: Any) -> None:
         """Per ADR-004: if execution fails, a follow-up error event must be written."""
         registry, engine, audit, audit_dir = _pipeline_setup
         agent = await registry.register(name="Bot", roles=["user"])

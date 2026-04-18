@@ -23,9 +23,7 @@ def test_verify_rbac_no_config() -> None:
 
 def test_verify_rbac_missing_config(tmp_path: Path) -> None:
     """Missing file exits with code 1."""
-    result = runner.invoke(
-        app, ["verify", "rbac", "--config", str(tmp_path / "nonexistent.yaml")]
-    )
+    result = runner.invoke(app, ["verify", "rbac", "--config", str(tmp_path / "nonexistent.yaml")])
     assert result.exit_code == 1
 
 
