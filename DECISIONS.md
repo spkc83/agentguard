@@ -420,4 +420,34 @@ Fixing these in five places invited drift; future adapters (Autogen, Swarm, Atom
 - Negative: Private module means users can't subclass the pipeline — acceptable, since governance flow should not be customizable per-adapter
 - Negative: Slight indirection when reading a single adapter — mitigated by docstring in `_pipeline.py`
 
+---
+
+## ADR-021 — Library-mode OTel tracer: never mutate the global TracerProvider
+**Status:** Accepted
+**Date:** 2026-04-18
+
+**Context:** The first M6 `AgentTracer` implementation installed a fresh
+`TracerProvider` via `trace.set_tracer_provider()` when the current
+provider was not a `TracerProvider` instance (the OTel default is a
+`ProxyTracerProvider`). This is an aggressive move for a library: if the
+host application configures its own provider later, spans end up
+fragmented across two providers with different exporters.
+
+**Decision:** `AgentTracer` only calls `trace.get_tracer(service_name)`
+and never mutates the global provider. When the host application has not
+configured OTel yet, the default `ProxyTracerProvider` produces no-op
+spans, matching the behavior users already expect from library-level
+OTel instrumentation. When the host configures OTel afterwards, the
+tracer starts emitting real spans automatically.
+
+**Consequences:**
+- Positive: AgentGuard plays nicely with any host OTel setup (Datadog,
+  Jaeger, Honeycomb, Grafana) without risk of double-provider state
+- Positive: Aligns with OpenTelemetry's stated "library author" guidance
+- Negative: Out-of-the-box spans are no-ops until the user configures a
+  provider — documented in the tracer module docstring
+- Note: This was flagged by the ADR-017/018/020 post-implementation
+  review (ADR-018 promised NoOp fallback behavior but the first cut
+  took a more intrusive path)
+
 *When you (Claude Code) make a new architectural decision, append it here following the same format. Increment the ADR number sequentially.*

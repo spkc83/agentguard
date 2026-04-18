@@ -214,3 +214,36 @@ class TestMetricsDashboard:
         output = dashboard.to_markdown(metrics)
         assert "# AgentGuard Dashboard" in output
         assert "Events analyzed:** 0" in output
+
+    def test_all_zero_duration_events(self) -> None:
+        """When no event has a positive duration, percentiles are 0.0 (line 148)."""
+        dashboard = MetricsDashboard()
+        events = [
+            _make_event(duration_ms=0.0),
+            _make_event(duration_ms=0.0),
+            _make_event(duration_ms=0.0),
+        ]
+        metrics = dashboard.compute(events)
+        assert metrics.total_events == 3
+        assert metrics.latency_p50_ms == 0.0
+        assert metrics.latency_p95_ms == 0.0
+        assert metrics.latency_p99_ms == 0.0
+
+    def test_to_markdown_with_policy_violations(self) -> None:
+        """Markdown output renders the Policy violations section."""
+        dashboard = MetricsDashboard()
+        policy_results = [
+            PolicyResult(
+                rule_id="OWASP-AGENT-01",
+                rule_name="Prompt Injection",
+                passed=False,
+                severity="critical",
+                evidence={},
+                remediation="Fix",
+            )
+        ]
+        events = [_make_event(policy_results=policy_results)]
+        metrics = dashboard.compute(events)
+        output = dashboard.to_markdown(metrics)
+        assert "## Policy violations" in output
+        assert "OWASP-AGENT-01" in output

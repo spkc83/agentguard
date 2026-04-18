@@ -134,7 +134,6 @@ async def main() -> None:
 
     # --- Observability: filtered replay ---------------------------------------
     debugger = ReplayDebugger()
-    problems = debugger.filter(events, result=None)  # pull all
     denied = debugger.filter(events, result="denied")
     errored = debugger.filter(events, result="error")
 
@@ -149,8 +148,6 @@ async def main() -> None:
     # --- Tamper-evidence check (chain verification) ---------------------------
     verification = await audit_log.verify_chain()
     print(f"\nAudit chain valid: {verification.valid} ({verification.event_count} events)")  # noqa: T201
-
-    _ = problems  # silence unused-variable linter
 
 
 if __name__ == "__main__":

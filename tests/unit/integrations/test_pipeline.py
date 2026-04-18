@@ -172,3 +172,37 @@ class TestPipeline:
         verification = await audit.verify_chain()
         assert verification.valid
         assert verification.event_count == 2
+
+    async def test_error_event_write_failure_does_not_mask_original(
+        self, _pipeline_setup: Any
+    ) -> None:
+        """If the error-event write itself fails, the original exception still propagates."""
+        registry, engine, audit, _ = _pipeline_setup
+        agent = await registry.register(name="Bot", roles=["user"])
+
+        # Patch the audit log so the SECOND write (the error event) fails.
+        # The first write (pre-event, allowed) must still succeed.
+        original_write = audit.write
+        call_count = {"n": 0}
+
+        async def flaky_write(event: Any) -> Any:
+            call_count["n"] += 1
+            if call_count["n"] == 2:  # the error-event write
+                raise RuntimeError("disk full")
+            return await original_write(event)
+
+        audit.write = flaky_write  # type: ignore[assignment]
+        executor = AsyncMock(side_effect=ValueError("original"))
+
+        # The original ValueError must surface — not the disk-full RuntimeError.
+        with pytest.raises(ValueError, match="original"):
+            await run_governed(
+                agent_id=agent.agent_id,
+                action="tool:test",
+                resource="allowed/x",
+                registry=registry,
+                rbac_engine=engine,
+                audit_log=audit,
+                executor=executor,
+            )
+        assert call_count["n"] == 2
