@@ -116,9 +116,7 @@ async def run_governed(
                 trace_id=trace_id,
             )
             await audit_log.write(denied_event)
-            raise PermissionDeniedError(
-                agent_id, action, resource, reason=permission_ctx.reason
-            )
+            raise PermissionDeniedError(agent_id, action, resource, reason=permission_ctx.reason)
 
         # 3. Pre-event (log-first)
         pre_event = AuditEvent(
