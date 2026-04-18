@@ -6,9 +6,11 @@ Entry point: `agentguard` (configured in pyproject.toml).
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime
 from pathlib import Path
 
 import typer
+import yaml
 from rich.console import Console
 from rich.table import Table
 
@@ -22,10 +24,12 @@ app = typer.Typer(
 audit_app = typer.Typer(help="Audit log operations.")
 policy_app = typer.Typer(help="Policy management and compliance reporting.")
 verify_app = typer.Typer(help="Formal verification of RBAC and policy properties.")
+observe_app = typer.Typer(help="Observability — replay, dashboard, metrics.")
 
 app.add_typer(audit_app, name="audit")
 app.add_typer(policy_app, name="policy")
 app.add_typer(verify_app, name="verify")
+app.add_typer(observe_app, name="observe")
 
 console = Console()
 
@@ -225,7 +229,26 @@ def policy_report(
 def verify_rbac(
     config: Path = typer.Option(None, help="RBAC YAML config file."),
 ) -> None:
-    """Formally verify RBAC configuration for privilege escalation."""
+    """Formally verify RBAC configuration for privilege escalation.
+
+    Config file schema:
+
+        roles:
+          - name: analyst
+            permissions:
+              - {action: "tool:*", resource: "bureau/*", effect: allow}
+              - {action: "tool:admin", resource: "*", effect: deny}
+          - name: admin
+            permissions:
+              - {action: "*", resource: "*", effect: allow}
+        target_permission:
+          action: tool:admin
+          resource: admin/users
+        forbidden_roles: [analyst]
+    """
+    from agentguard.compliance.formal_verifier import FormalVerifier
+    from agentguard.core.rbac import Permission, Role
+
     if config is None:
         console.print(
             "[yellow]No RBAC config specified. Use --config to provide a YAML file.[/yellow]"
@@ -233,8 +256,68 @@ def verify_rbac(
         console.print("Example: agentguard verify rbac --config rbac_config.yaml")
         return
 
-    console.print(f"[green]Verifying RBAC from {config}...[/green]")
-    console.print("[yellow]RBAC file loading will be added in a future release.[/yellow]")
+    if not config.exists():
+        console.print(f"[red]Config file not found: {config}[/red]")
+        raise typer.Exit(code=1)
+
+    data = yaml.safe_load(config.read_text())
+    raw_roles = data.get("roles", [])
+    if not raw_roles:
+        console.print("[yellow]No roles defined in config.[/yellow]")
+        return
+
+    # Build Pydantic Role objects for the verifier
+    roles: list[Role] = []
+    for r in raw_roles:
+        perms = [
+            Permission(action=p["action"], resource=p["resource"], effect=p["effect"])
+            for p in r.get("permissions", [])
+        ]
+        roles.append(Role(name=r["name"], permissions=perms))
+
+    # Compute the target permission index (matching the verifier's sort order)
+    all_perms: set[tuple[str, str]] = set()
+    for role in roles:
+        for p in role.permissions:
+            all_perms.add((p.action, p.resource))
+    perm_list = sorted(all_perms)
+
+    target_action = data.get("target_permission", {}).get("action", "")
+    target_resource = data.get("target_permission", {}).get("resource", "")
+    try:
+        target_index = perm_list.index((target_action, target_resource))
+    except ValueError:
+        console.print(
+            f"[red]Target permission ({target_action}, {target_resource}) "
+            f"not referenced by any role.[/red]"
+        )
+        raise typer.Exit(code=1) from None
+
+    forbidden_roles = data.get("forbidden_roles", [])
+
+    verifier = FormalVerifier()
+    result = verifier.verify_rbac_escalation(
+        roles=roles,
+        target_permission_index=target_index,
+        forbidden_roles=forbidden_roles,
+    )
+
+    if result.status == "unsat":
+        console.print(
+            f"[green]RBAC verified.[/green] No privilege escalation path to "
+            f"({target_action}, {target_resource}) from forbidden roles "
+            f"{forbidden_roles}."
+        )
+    elif result.status == "sat":
+        console.print(
+            f"[red bold]PRIVILEGE ESCALATION DETECTED[/red bold] — "
+            f"forbidden roles can reach ({target_action}, {target_resource})."
+        )
+        if result.counterexample:
+            console.print(f"[red]Counterexample:[/red] {result.counterexample}")
+        raise typer.Exit(code=1)
+    else:
+        console.print(f"[yellow]Verification result: {result.status}[/yellow]")
 
 
 @verify_app.command("policy")
@@ -278,3 +361,100 @@ def verify_policy(
             console.print(f"  {c['rule1']} <-> {c['rule2']}")
     else:
         console.print(f"[yellow]Verification result: {result.status}[/yellow]")
+
+
+@observe_app.command("dashboard")
+def observe_dashboard(
+    log_dir: Path = typer.Option("./audit-logs", help="Audit log directory."),
+    output_format: str = typer.Option("markdown", help="Output format: json or markdown."),
+) -> None:
+    """Compute aggregate governance metrics from audit events."""
+    from agentguard.core.audit import FileAuditBackend
+    from agentguard.observability.dashboard import MetricsDashboard
+
+    async def _dashboard() -> None:
+        backend = FileAuditBackend(directory=log_dir)
+        events = await backend.read_all()
+        dashboard = MetricsDashboard()
+        metrics = dashboard.compute(events)
+
+        if output_format == "json":
+            console.print(dashboard.to_json(metrics))
+        else:
+            console.print(dashboard.to_markdown(metrics))
+
+    asyncio.run(_dashboard())
+
+
+@observe_app.command("replay")
+def observe_replay(
+    log_dir: Path = typer.Option("./audit-logs", help="Audit log directory."),
+    agent_id: str | None = typer.Option(None, help="Filter by agent ID."),
+    action: str | None = typer.Option(None, help="Filter by action substring."),
+    result: str | None = typer.Option(
+        None, help="Filter by result: allowed, denied, escalated, error."
+    ),
+    start_time: str | None = typer.Option(
+        None, help="Filter start time (ISO 8601, e.g. 2026-04-10T12:00:00+00:00)."
+    ),
+    end_time: str | None = typer.Option(None, help="Filter end time (ISO 8601)."),
+) -> None:
+    """Filtered replay of audit events with governance decision summaries."""
+    from agentguard.observability.replay import ReplayDebugger
+
+    async def _replay() -> None:
+        debugger = ReplayDebugger()
+        events = await debugger.load(log_dir)
+
+        start_dt = datetime.fromisoformat(start_time) if start_time else None
+        end_dt = datetime.fromisoformat(end_time) if end_time else None
+
+        filtered = debugger.filter(
+            events,
+            agent_id=agent_id,
+            action=action,
+            result=result,
+            start_time=start_dt,
+            end_time=end_dt,
+        )
+
+        if not filtered:
+            console.print("[yellow]No events match the given filters.[/yellow]")
+            return
+
+        timeline = debugger.timeline(filtered)
+        for entry in timeline:
+            flag_str = f" [dim]({', '.join(entry.flags)})[/dim]" if entry.flags else ""
+            console.print(f"[bold]{entry.index + 1}.[/bold] {entry.decision_summary}{flag_str}")
+
+        console.print(f"\n[green]{len(filtered)} events shown.[/green]")
+
+    asyncio.run(_replay())
+
+
+@observe_app.command("summary")
+def observe_summary(
+    log_dir: Path = typer.Option("./audit-logs", help="Audit log directory."),
+) -> None:
+    """Quick counts by result/agent/action."""
+    from agentguard.core.audit import FileAuditBackend
+    from agentguard.observability.replay import ReplayDebugger
+
+    async def _summary() -> None:
+        backend = FileAuditBackend(directory=log_dir)
+        events = await backend.read_all()
+        debugger = ReplayDebugger()
+        summary = debugger.summarize(events)
+
+        console.print(f"[bold]Total events:[/bold] {summary['total_events']}")
+        console.print("\n[bold]By result:[/bold]")
+        for k, v in summary["by_result"].items():
+            console.print(f"  {k}: {v}")
+        console.print("\n[bold]By agent:[/bold]")
+        for k, v in sorted(summary["by_agent"].items(), key=lambda x: -x[1])[:10]:
+            console.print(f"  {k}: {v}")
+        console.print("\n[bold]Top actions:[/bold]")
+        for k, v in sorted(summary["by_action"].items(), key=lambda x: -x[1])[:10]:
+            console.print(f"  {k}: {v}")
+
+    asyncio.run(_summary())

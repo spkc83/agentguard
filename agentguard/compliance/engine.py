@@ -12,13 +12,15 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, cast
 
 import structlog
 import yaml
 from pydantic import BaseModel, ConfigDict
 
 from agentguard.models import AuditEvent, PolicyResult
+
+Severity = Literal["critical", "high", "medium", "low"]
 
 logger = structlog.get_logger()
 
@@ -44,7 +46,7 @@ class PolicyRule(BaseModel):
 
     id: str
     name: str
-    severity: str  # critical, high, medium, low
+    severity: Severity
     description: str
     check: dict[str, Any]
     remediation: str
@@ -173,7 +175,7 @@ class PolicyEngine:
                 remediation=rule.remediation,
             )
 
-        return handler(self, rule, event)
+        return cast("PolicyResult", handler(self, rule, event))
 
     def _check_action_blocklist(self, rule: PolicyRule, event: AuditEvent) -> PolicyResult:
         """Check if the action matches any blocked pattern."""

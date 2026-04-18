@@ -343,4 +343,81 @@ pip install agentguard[all]         # everything
 - Negative: Cannot express temporal properties or quantified path constraints
 - Future: Re-evaluate µZ when agent workflow graphs become larger or need richer properties
 
+---
+
+## ADR-017 — Protocol-based framework adapters with governance pipeline
+**Status:** Accepted
+**Date:** 2026-04-16
+
+**Context:** AgentGuard needs to integrate with LangGraph, CrewAI, Google ADK, and A2A without depending on any of these frameworks at runtime. Each framework has a different tool execution interface.
+
+**Options considered:**
+1. Abstract base class with framework-specific subclasses — requires import of framework
+2. Protocol-based adapters with lazy imports ← chosen
+3. Monkey-patching framework internals — fragile and version-dependent
+
+**Decision:** Define minimal Protocol interfaces (`LangChainTool`, `CrewAIToolProtocol`, `AdkToolProtocol`, `A2ATransport`) that capture the essential method signature of each framework's tool/transport. Governed wrappers accept `Any` and duck-type against these protocols. No framework imports at module level — frameworks are only needed when the user instantiates a governed wrapper with a real tool.
+
+**Consequences:**
+- Positive: Zero import-time dependency on any framework
+- Positive: Each adapter follows identical governance pipeline (identity→RBAC→breaker→audit→execute)
+- Positive: Users can test with simple mock objects matching the protocol
+- Negative: Protocol drift if frameworks change their tool interfaces — mitigated by protocol being minimal (1-2 methods)
+- Negative: No static type checking against actual framework types — acceptable trade-off for decoupling
+
+---
+
+## ADR-018 — NoOp fallback for OpenTelemetry tracer
+**Status:** Accepted
+**Date:** 2026-04-16
+
+**Context:** The observability layer uses OpenTelemetry for tracing, but `opentelemetry-sdk` is an optional dependency. The tracer must work gracefully when OTel is not installed.
+
+**Decision:** `AgentTracer` lazily imports `opentelemetry` at init time. If the import fails, all span operations produce `_NoOpSpan` objects with zero overhead. The `is_active` property lets callers check availability. Convenience methods (`trace_rbac_check`, `trace_policy_evaluation`, `trace_tool_call`) encapsulate common governance span patterns.
+
+**Consequences:**
+- Positive: Core runtime works without OTel installed — no unnecessary dependency
+- Positive: Drop-in activation: `pip install agentguard[observability]` enables real tracing
+- Positive: All span attributes use `agentguard.*` namespace per OTel semantic conventions
+- Negative: NoOp path means missing traces when OTel is not configured — document clearly
+
+---
+
+## ADR-019 — Audit-based observability (replay + dashboard from audit events)
+**Status:** Accepted
+**Date:** 2026-04-16
+
+**Context:** The replay debugger and metrics dashboard need a data source. Options were: (1) separate event store, (2) OTel trace backend queries, (3) existing audit log.
+
+**Decision:** Both `ReplayDebugger` and `MetricsDashboard` operate on `list[AuditEvent]` loaded from the existing `FileAuditBackend`. No additional data store is required. The audit log is the single source of truth for governance decisions — replay and metrics are views over it.
+
+**Consequences:**
+- Positive: No additional infrastructure; works offline from JSONL files
+- Positive: Consistent with "audit log is the single source of truth" design principle
+- Positive: Replay can filter by agent, action, result, time range — all fields already in AuditEvent
+- Negative: Large audit logs may require pagination (not yet implemented — acceptable for v1.0)
+- Future: Add streaming/pagination for audit logs exceeding 100K events
+
+---
+
+## ADR-020 — Shared governance pipeline for integration adapters
+**Status:** Accepted
+**Date:** 2026-04-17
+
+**Context:** The first M5 implementation duplicated a ~60-line governance pipeline (identity → RBAC → audit → breaker → execute) across five adapters (MCP, LangGraph, CrewAI, Google ADK, A2A). During post-implementation review, two serious bugs surfaced in all five adapters:
+1. **Missing error event logging:** when executor raised, no follow-up `result="error"` audit event was written, violating ADR-004.
+2. **Missing duration tracking:** on failure, no timing information was captured, so the dashboard couldn't compute error-path latencies.
+
+Fixing these in five places invited drift; future adapters (Autogen, Swarm, Atomic Agents) would inherit the same divergence risk.
+
+**Decision:** Extract the governance pipeline into `agentguard/integrations/_pipeline.run_governed`. All adapters construct a zero-arg async `executor` callable and delegate the full pipeline (identity resolution, RBAC, pre-event, circuit breaker, execute, error event on exception, OTel span wrapping) to the shared helper. The module is underscore-prefixed (private) — not part of the public API contract.
+
+**Consequences:**
+- Positive: Error-event logging (ADR-004) is enforced in one place, tested once
+- Positive: Adapters shrink from ~90 LOC to ~30 LOC each
+- Positive: OTel tracer wiring lives in one place; adapters opt in via a `tracer=` constructor parameter
+- Positive: New framework adapters become near-trivial
+- Negative: Private module means users can't subclass the pipeline — acceptable, since governance flow should not be customizable per-adapter
+- Negative: Slight indirection when reading a single adapter — mitigated by docstring in `_pipeline.py`
+
 *When you (Claude Code) make a new architectural decision, append it here following the same format. Increment the ADR number sequentially.*

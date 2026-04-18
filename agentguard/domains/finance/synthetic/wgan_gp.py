@@ -236,4 +236,5 @@ class WganGpTrainer:
         with torch.no_grad():
             noise = torch.randn(n_samples, self._config.latent_dim)
             synthetic = self._generator(noise)
-            return synthetic.tolist()
+            result: list[list[float]] = synthetic.tolist()
+            return result

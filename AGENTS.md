@@ -101,16 +101,17 @@ This file defines specialized agent roles for use with Claude Code's multi-agent
 ---
 
 ### `integration-builder`
-**Purpose:** Build and maintain framework adapters and middleware (`agentguard/integrations/`).
+**Purpose:** Build and maintain framework adapters and middleware (`agentguard/integrations/`). **v0.5.0 — complete.**
 
 **Owns:**
-- `agentguard/integrations/mcp_middleware.py` — MCP protocol interceptor/wrapper
-- `agentguard/integrations/a2a_middleware.py` — A2A protocol interceptor/wrapper
-- `agentguard/integrations/langgraph.py` — LangGraph integration (decorator + graph wrapper)
-- `agentguard/integrations/crewai.py` — CrewAI integration (tool wrapper + crew hook)
-- `agentguard/integrations/google_adk.py` — Google ADK integration
-- `examples/quickstart.py` — 5-minute getting-started example
-- `tests/integration/` — integration tests (require Docker + LLM API key)
+- `agentguard/integrations/_pipeline.py` — shared governance pipeline; all adapters delegate to `run_governed` (ADR-020)
+- `agentguard/integrations/mcp_middleware.py` — MCP protocol interceptor (`GovernedMcpClient`)
+- `agentguard/integrations/a2a_middleware.py` — A2A protocol interceptor (`GovernedA2AClient`)
+- `agentguard/integrations/langgraph.py` — LangGraph `GovernedLangGraphToolNode`
+- `agentguard/integrations/crewai.py` — CrewAI `GovernedCrewAITool`
+- `agentguard/integrations/google_adk.py` — Google ADK `GovernedAdkTool`
+- `examples/quickstart.py`, `examples/observability/monitoring_demo.py`
+- `tests/unit/integrations/`, `tests/integration/`
 - `docs/` — integration guides per framework
 
 **Key constraints:**
@@ -128,14 +129,14 @@ This file defines specialized agent roles for use with Claude Code's multi-agent
 ---
 
 ### `observability-engineer`
-**Purpose:** Build the Layer 4 Observability stack (`agentguard/observability/`).
+**Purpose:** Build the Layer 4 Observability stack (`agentguard/observability/`). **v1.0.0 — complete.**
 
 **Owns:**
-- `agentguard/observability/tracer.py` — OpenTelemetry-native agent decision trace exporter
-- `agentguard/observability/replay.py` — tool call replay and step-through debugger
-- `agentguard/observability/dashboard.py` — metrics aggregator (cost, latency, policy violations)
-- `agentguard/cli.py` — `agentguard` CLI (audit, policy, sandbox subcommands)
-- `tests/unit/observability/`
+- `agentguard/observability/tracer.py` — OpenTelemetry-native agent decision trace exporter (lazy import, NoOp fallback)
+- `agentguard/observability/replay.py` — audit log replay debugger with filter/timeline/summarize
+- `agentguard/observability/dashboard.py` — metrics aggregator (denial rates, latency percentiles, per-agent activity, policy violation trends) with `to_json`/`to_markdown` output
+- `agentguard/cli.py` — `agentguard observe dashboard/replay/summary` subcommands
+- `tests/unit/observability/`, `tests/unit/test_cli_observe.py`
 
 **Key constraints:**
 - OpenTelemetry is non-negotiable — do not use a proprietary tracing format
