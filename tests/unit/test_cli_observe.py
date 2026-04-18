@@ -105,3 +105,46 @@ def test_observe_summary(tmp_path: Path) -> None:
     assert result.exit_code == 0
     assert "Total events" in result.output
     assert "By result" in result.output
+
+
+@pytest.mark.usefixtures("_set_audit_key")
+def test_observe_replay_naive_iso_time(tmp_path: Path) -> None:
+    """Naive ISO times should be coerced to UTC, not crash on comparison."""
+    log_dir = tmp_path / "audit"
+    log_dir.mkdir()
+    _write_events(log_dir, count=3)
+    # Naive timestamp — would previously raise TypeError comparing to tz-aware event.timestamp.
+    result = runner.invoke(
+        app,
+        [
+            "observe",
+            "replay",
+            "--log-dir",
+            str(log_dir),
+            "--start-time",
+            "2020-01-01T00:00:00",
+        ],
+    )
+    assert result.exit_code == 0
+    # Should show events (start_time is in the past)
+    assert "events shown" in result.output.lower()
+
+
+@pytest.mark.usefixtures("_set_audit_key")
+def test_observe_replay_aware_iso_time(tmp_path: Path) -> None:
+    """Tz-aware ISO strings also work."""
+    log_dir = tmp_path / "audit"
+    log_dir.mkdir()
+    _write_events(log_dir, count=2)
+    result = runner.invoke(
+        app,
+        [
+            "observe",
+            "replay",
+            "--log-dir",
+            str(log_dir),
+            "--end-time",
+            "2099-12-31T23:59:59+00:00",
+        ],
+    )
+    assert result.exit_code == 0

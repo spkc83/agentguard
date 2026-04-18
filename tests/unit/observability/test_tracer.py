@@ -73,3 +73,49 @@ class TestAgentTracer:
         tracer = AgentTracer(enabled=False)
         with tracer.span("bare_span") as span:
             assert isinstance(span, _NoOpSpan)
+
+    def test_span_attributes_prefixed(self) -> None:
+        """When OTel is available, user attribute keys get the agentguard.* prefix.
+
+        We verify the prefixing logic by stubbing the underlying tracer rather
+        than depending on a full OTel SDK setup.
+        """
+        import pytest
+
+        pytest.importorskip("opentelemetry")
+
+        tracer = AgentTracer(enabled=True)
+        if not tracer.is_active:
+            pytest.skip("OTel not available in this environment")
+
+        recorded: dict[str, object] = {}
+
+        class _StubSpan:
+            def __enter__(self) -> _StubSpan:
+                return self
+
+            def __exit__(self, *args: object) -> None:
+                return None
+
+        class _StubTracer:
+            def start_as_current_span(
+                self, name: str, attributes: dict[str, object] | None = None
+            ) -> _StubSpan:
+                recorded["name"] = name
+                recorded["attributes"] = attributes or {}
+                return _StubSpan()
+
+        tracer._tracer = _StubTracer()
+        with tracer.span("rbac_check", attributes={"agent_id": "abc"}):
+            pass
+
+        attrs = recorded["attributes"]
+        assert isinstance(attrs, dict)
+        # User key gets prefixed
+        assert "agentguard.agent_id" in attrs
+        # Pre-prefixed keys pass through untouched
+        with tracer.span("x", attributes={"agentguard.already": 1}) as _:
+            pass
+        attrs2 = recorded["attributes"]
+        assert isinstance(attrs2, dict)
+        assert "agentguard.already" in attrs2

@@ -6,7 +6,7 @@ Entry point: `agentguard` (configured in pyproject.toml).
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 import typer
@@ -15,6 +15,21 @@ from rich.console import Console
 from rich.table import Table
 
 from agentguard._logging import configure_logging
+
+
+def _parse_iso_utc(value: str | None) -> datetime | None:
+    """Parse an ISO 8601 string, coercing naive datetimes to UTC.
+
+    Audit event timestamps are tz-aware (UTC). Without coercion, a user
+    passing ``2026-04-10T12:00:00`` (no offset) would trigger a
+    ``TypeError`` when compared to a tz-aware event timestamp.
+    """
+    if value is None:
+        return None
+    parsed = datetime.fromisoformat(value)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed
 
 app = typer.Typer(
     name="agentguard",
@@ -406,8 +421,8 @@ def observe_replay(
         debugger = ReplayDebugger()
         events = await debugger.load(log_dir)
 
-        start_dt = datetime.fromisoformat(start_time) if start_time else None
-        end_dt = datetime.fromisoformat(end_time) if end_time else None
+        start_dt = _parse_iso_utc(start_time)
+        end_dt = _parse_iso_utc(end_time)
 
         filtered = debugger.filter(
             events,

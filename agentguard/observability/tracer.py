@@ -63,12 +63,13 @@ class AgentTracer:
         if enabled:
             try:
                 from opentelemetry import trace
-                from opentelemetry.sdk.trace import TracerProvider
 
-                provider = trace.get_tracer_provider()
-                if not isinstance(provider, TracerProvider):
-                    provider = TracerProvider()
-                    trace.set_tracer_provider(provider)
+                # Library policy: never mutate the global TracerProvider. The
+                # host application is responsible for configuring providers
+                # and exporters. We just request a named tracer and trust
+                # whatever provider is currently installed (including the
+                # default ProxyTracerProvider when the app hasn't configured
+                # one — spans will be no-ops until it does).
                 self._tracer = trace.get_tracer(service_name)
                 self._otel_available = True
                 logger.debug("otel_tracer_initialized", service_name=service_name)

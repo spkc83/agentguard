@@ -50,7 +50,7 @@ agentguard/
 │   │   └── google_adk.py        # GovernedAdkTool — governed ADK tool wrapper
 │   └── cli.py                   # `agentguard` CLI entry point
 ├── tests/
-│   ├── unit/                    # Fast unit tests (267 tests, 90% coverage)
+│   ├── unit/                    # Fast unit tests (278 tests, 92% coverage)
 │   ├── integration/             # Docker sandbox integration tests
 │   └── red_team/                # Adversarial sandbox escape tests
 ├── examples/

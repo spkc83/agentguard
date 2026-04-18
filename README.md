@@ -41,7 +41,7 @@ All 4 layers are implemented and tested:
 | CLI | All | Done | `audit show/verify/replay`, `policy validate/report`, `verify rbac/policy` |
 | CI | All | Done | GitHub Actions: lint, type check, test (Python 3.11 + 3.12) |
 
-**267 tests, 90% coverage.**
+**278 tests, 92% coverage.**
 
 ## Quickstart
 
@@ -198,7 +198,7 @@ AGENTGUARD_AUDIT_KEY=dev-key pytest tests/ --cov=agentguard --cov-report=term-mi
 ## Project Documentation
 
 - [ARCHITECTURE.md](ARCHITECTURE.md) — full architecture reference (4 layers, threat model, deployment patterns)
-- [DECISIONS.md](DECISIONS.md) — architectural decision records (20 ADRs)
+- [DECISIONS.md](DECISIONS.md) — architectural decision records (21 ADRs)
 - [AGENTS.md](AGENTS.md) — agent role definitions for parallel development
 
 ## License
