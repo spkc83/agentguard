@@ -54,14 +54,17 @@ agentguard/
 │   ├── integration/             # Docker sandbox integration tests
 │   └── red_team/                # Adversarial sandbox escape tests
 ├── examples/
-│   ├── credit_decisioning/      # End-to-end credit decisioning agent demo
-│   ├── adverse_action_generation/ # Adverse action notice pipeline demo
+│   ├── credit_decisioning/      # End-to-end credit decisioning agent demo (end_to_end_demo.py)
+│   ├── adverse_action_generation/ # Adverse action notice pipeline demo (notice_pipeline.py)
+│   ├── observability/           # Metrics + replay demo (monitoring_demo.py)
 │   └── quickstart.py            # 5-minute getting started
 ├── docs/
-│   ├── architecture.md          # Links to ARCHITECTURE.md
-│   ├── compliance/
-│   └── api/
-├── datasets/                    # Synthetic benchmark datasets
+│   ├── architecture.md          # Index into root ARCHITECTURE.md
+│   ├── api/index.md             # Module-by-module API overview
+│   └── compliance/index.md      # Policy frameworks reference
+├── scripts/
+│   └── generate_datasets.py     # Deterministic synthetic dataset generator
+├── datasets/                    # On-demand synthetic datasets (README + generated output; no binaries committed)
 ├── CLAUDE.md                    # ← this file
 ├── AGENTS.md                    # Claude Code agent role definitions
 ├── ARCHITECTURE.md              # Full architecture reference
