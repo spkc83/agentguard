@@ -232,3 +232,21 @@ class TestRBACEngine:
         RBACEngine(roles=[role_a, role_b])
         captured = capsys.readouterr()
         assert "circular_role_inheritance" in captured.out
+
+    async def test_check_permission_terminates_with_cycle(self) -> None:
+        """check_permission on a cyclic role graph must terminate with a deterministic result."""
+        role_a = Role(
+            name="role-a",
+            permissions=[Permission(action="tool:a", resource="*", effect="allow")],
+            inherited_roles=["role-b"],
+        )
+        role_b = Role(
+            name="role-b",
+            permissions=[Permission(action="tool:b", resource="*", effect="allow")],
+            inherited_roles=["role-a"],
+        )
+        engine = RBACEngine(roles=[role_a, role_b])
+        ctx_a = await engine.check_permission(_identity(["role-a"]), "tool:a", "anywhere")
+        ctx_b = await engine.check_permission(_identity(["role-a"]), "tool:b", "anywhere")
+        assert ctx_a.granted is True
+        assert ctx_b.granted is True

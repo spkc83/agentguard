@@ -133,6 +133,30 @@ class TestAppendOnlyAuditLog:
         assert result.event_count == 0
 
     @pytest.mark.usefixtures("_set_audit_key")
+    async def test_custom_backend_protocol_swap(self, tmp_audit_dir: Path) -> None:
+        """Any AuditBackend-conforming object can replace FileAuditBackend without modifying audit log code."""
+
+        class InMemoryBackend:
+            def __init__(self) -> None:
+                self.events: list[AuditEvent] = []
+
+            async def append(self, event: AuditEvent) -> None:
+                self.events.append(event)
+
+            async def read_all(self) -> list[AuditEvent]:
+                return list(self.events)
+
+        backend = InMemoryBackend()
+        log = AppendOnlyAuditLog(backend=backend)
+        for i in range(3):
+            await log.write(_make_event(event_id=f"evt-{i:03d}"))
+
+        result = await log.verify_chain()
+        assert result.valid is True
+        assert result.event_count == 3
+        assert len(backend.events) == 3
+
+    @pytest.mark.usefixtures("_set_audit_key")
     async def test_chain_survives_restart(self, tmp_audit_dir: Path) -> None:
         """Simulates process restart: new AppendOnlyAuditLog against existing log."""
         backend = FileAuditBackend(directory=tmp_audit_dir)

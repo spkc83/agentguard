@@ -1,0 +1,5 @@
+{
+  "triggered_at": "2026-04-24T00:35:08.009Z",
+  "command": "AGENTGUARD_AUDIT_KEY=dev-key pytest tests/unit/core/test_identity.py -v 2>&1 | tail -20",
+  "failure_excerpt": "FAIL Required test coverage of 80% not reached. Total coverage: 11.37%"
+}

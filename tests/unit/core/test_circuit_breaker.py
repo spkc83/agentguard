@@ -102,3 +102,27 @@ class TestTokenBucketRateLimiter:
         await rl.acquire("agent-1")
         await asyncio.sleep(0.1)  # refills ~2 tokens
         await rl.acquire("agent-1")  # should succeed after refill
+
+    async def test_concurrent_acquires_no_over_issue(self) -> None:
+        """Concurrent acquirers must not collectively exceed the bucket capacity."""
+        rl = TokenBucketRateLimiter(max_tokens=10, refill_rate=0.0)
+        results = await asyncio.gather(
+            *(rl.acquire("agent-1") for _ in range(30)),
+            return_exceptions=True,
+        )
+        successes = [r for r in results if r is None]
+        rate_errors = [r for r in results if isinstance(r, RateLimitExceededError)]
+        assert len(successes) == 10
+        assert len(rate_errors) == 20
+
+
+class TestCircuitBreakerConcurrent:
+    async def test_concurrent_failures_open_breaker_exactly_once(self) -> None:
+        """Concurrent failures must still transition to OPEN without corrupting state."""
+        cb = CircuitBreaker(name="concurrent", failure_threshold=5, recovery_timeout=60.0)
+        results = await asyncio.gather(
+            *(cb.call(_failing_fn) for _ in range(20)),
+            return_exceptions=True,
+        )
+        assert cb.state == CircuitState.OPEN
+        assert any(isinstance(r, RuntimeError) for r in results)
