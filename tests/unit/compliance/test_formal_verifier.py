@@ -128,6 +128,57 @@ class TestFormalVerifier:
         result = verifier.verify_policy_consistency([])
         assert result.status == "unsat"
 
+    def test_workflow_unknown_when_source_or_target_missing(self) -> None:
+        """Source or target absent from node list -> unknown, not raise."""
+        verifier = FormalVerifier()
+        r1 = verifier.verify_workflow_safety(
+            nodes=["a", "b"],
+            edges=[("a", "b")],
+            hitl_nodes=set(),
+            source="ghost",
+            target="b",
+        )
+        assert r1.status == "unknown"
+
+        r2 = verifier.verify_workflow_safety(
+            nodes=["a", "b"],
+            edges=[("a", "b")],
+            hitl_nodes=set(),
+            source="a",
+            target="ghost",
+        )
+        assert r2.status == "unknown"
+
+    def test_compliance_engine_imports_without_z3(self) -> None:
+        """R6 C3: the rest of the compliance layer must be usable without z3 loaded.
+
+        Verified structurally: agentguard.compliance.engine and agentguard.compliance.hitl
+        do not import from z3 or z3_models at module level. A full 'z3 missing' smoke
+        test would require a subprocess/fresh interpreter; the structural check
+        documents the lazy-import contract established by ADR-013.
+        """
+        import ast
+
+        from agentguard.compliance import engine as engine_mod
+        from agentguard.compliance import hitl as hitl_mod
+
+        for mod in (engine_mod, hitl_mod):
+            src = open(mod.__file__).read()
+            tree = ast.parse(src)
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    assert not any(n.name.startswith("z3") for n in node.names), (
+                        f"{mod.__name__} imports z3 at module top level"
+                    )
+                if isinstance(node, ast.ImportFrom):
+                    assert node.module is None or not node.module.startswith("z3"), (
+                        f"{mod.__name__} imports from z3 at module top level"
+                    )
+                    assert node.module != "agentguard.compliance.z3_models", (
+                        f"{mod.__name__} imports z3_models at module top level "
+                        "(must be deferred to keep z3 optional)"
+                    )
+
 
 class TestVerificationResult:
     def test_result_is_frozen(self) -> None:

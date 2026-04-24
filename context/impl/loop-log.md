@@ -27,6 +27,12 @@ Build site: context/plans/build-site.md. Brownfield strict-as-built. Caveman-spe
 - Validation: pytest tests/unit/core tests/unit/test_models tests/unit/test_exceptions tests/unit/integrations/test_pipeline → 96 pass.
 - Next: Tier 1 (compliance-engine + observability).
 
+### Iteration 4 — 2026-04-22
+- Tier 1 compliance (T-034..T-064): DONE. 2 new tests (workflow unknown, z3-import structural).
+- Tier 1 observability (T-065..T-078): DONE via existing tests.
+- Validation: pytest compliance+observability → 82 pass.
+- Next: Tier 2 (finance-credit-risk + framework-integrations).
+
 ## Dead Ends
 
 See `context/impl/dead-ends.md`.
