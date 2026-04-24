@@ -72,3 +72,30 @@ class TestAgentRegistry:
         with pytest.raises(DuplicateAgentError) as exc_info:
             await registry.register(name="Second", roles=["readonly"], agent_id="dup-id")
         assert exc_info.value.agent_id == "dup-id"
+
+    async def test_concurrent_registrations_no_lost_entries(self) -> None:
+        import asyncio as _asyncio
+
+        registry = AgentRegistry()
+        await _asyncio.gather(
+            *(registry.register(name=f"agent-{i}", roles=[]) for i in range(50))
+        )
+        agents = await registry.list_agents()
+        assert len(agents) == 50
+        assert len({a.agent_id for a in agents}) == 50
+
+    async def test_concurrent_duplicate_only_one_wins(self) -> None:
+        import asyncio as _asyncio
+
+        registry = AgentRegistry()
+        results = await _asyncio.gather(
+            *(
+                registry.register(name=f"a-{i}", roles=[], agent_id="shared")
+                for i in range(20)
+            ),
+            return_exceptions=True,
+        )
+        successes = [r for r in results if not isinstance(r, Exception)]
+        failures = [r for r in results if isinstance(r, DuplicateAgentError)]
+        assert len(successes) == 1
+        assert len(failures) == 19
