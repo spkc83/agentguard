@@ -39,6 +39,11 @@ Build site: context/plans/build-site.md. Brownfield strict-as-built. Caveman-spe
 - Validation: pytest Tier 2 → 83 pass.
 - Next: Tier 3 (cli-surface).
 
+### Iteration 6 — 2026-04-22
+- Tier 3 CLI (T-121..T-135): DONE. 12 reqs × 36 criteria covered by 31 existing tests in test_cli*.py.
+- Validation: pytest tests/unit/ → 287 pass, 92.37% coverage (278 baseline + 9 new verification tests).
+- All tiers complete. 132/135 tasks DONE, 3 BLOCKED (Docker-only red-team T-019/T-020/T-021).
+
 ## Dead Ends
 
 See `context/impl/dead-ends.md`.
