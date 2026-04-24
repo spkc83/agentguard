@@ -73,3 +73,18 @@ class TestSyntheticCreditGenerator:
         records = gen.generate(n_samples=1000)
         statuses = {r["employment_status"] for r in records}
         assert "employed" in statuses
+
+    def test_fico_correlates_with_default(self) -> None:
+        """High-FICO records default less frequently than low-FICO records (R6 C5)."""
+        gen = SyntheticCreditGenerator(seed=42, default_rate=0.15)
+        records = gen.generate(n_samples=3000)
+
+        high_fico = [r for r in records if r["fico_score"] >= 720]
+        low_fico = [r for r in records if r["fico_score"] < 640]
+        assert high_fico and low_fico, "need samples in both FICO bands"
+
+        high_rate = sum(r["is_default"] for r in high_fico) / len(high_fico)
+        low_rate = sum(r["is_default"] for r in low_fico) / len(low_fico)
+        assert low_rate > high_rate, (
+            f"low-FICO default rate {low_rate:.3f} should exceed high-FICO {high_rate:.3f}"
+        )

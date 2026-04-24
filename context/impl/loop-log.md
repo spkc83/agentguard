@@ -33,6 +33,12 @@ Build site: context/plans/build-site.md. Brownfield strict-as-built. Caveman-spe
 - Validation: pytest compliance+observability → 82 pass.
 - Next: Tier 2 (finance-credit-risk + framework-integrations).
 
+### Iteration 5 — 2026-04-22
+- Tier 2 finance (T-079..T-101): DONE. 1 new test (FICO-default correlation).
+- Tier 2 integrations (T-102..T-120): DONE via existing tests.
+- Validation: pytest Tier 2 → 83 pass.
+- Next: Tier 3 (cli-surface).
+
 ## Dead Ends
 
 See `context/impl/dead-ends.md`.
