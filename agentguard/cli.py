@@ -329,8 +329,11 @@ def verify_rbac(
             target_permission_index=target_index,
             forbidden_roles=forbidden_roles,
         )
-    except ImportError as e:
-        console.print(f"[red]{e}[/red]\nInstall with: pip install 'agentguard\\[verify]'")
+    except ImportError:
+        console.print(
+            "[red]z3-solver is required for formal verification.[/red]\n"
+            "Install with: pip install 'agentguard\\[verify]'"
+        )
         raise typer.Exit(code=1) from None
 
     if result.status == "unsat":
@@ -387,8 +390,11 @@ def verify_policy(
         from agentguard.compliance.formal_verifier import FormalVerifier
 
         result = FormalVerifier().verify_policy_consistency(rules)
-    except ImportError as e:
-        console.print(f"[red]{e}[/red]\nInstall with: pip install 'agentguard\\[verify]'")
+    except ImportError:
+        console.print(
+            "[red]z3-solver is required for formal verification.[/red]\n"
+            "Install with: pip install 'agentguard\\[verify]'"
+        )
         raise typer.Exit(code=1) from None
 
     if result.status == "unsat":

@@ -87,7 +87,7 @@ class PolicyEngine:
     - resource_pattern: Flag access to sensitive resource patterns.
     - content_scan: Scan tool args/action for suspicious patterns.
     - permission_required: Require specific permission grants.
-    - rate_check: Flag high-frequency actions.
+    - result_required: Require the event result to be in an allowed set.
     - metadata_required: Require specific metadata fields on the agent.
 
     Unknown check types are rejected at load time (ADR-022): a misspelled

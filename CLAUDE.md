@@ -1,6 +1,6 @@
 # AgentGuard — Claude Code Context
 
-AgentGuard is an **open-source, framework-agnostic agent governance and security runtime** for AI agents in regulated industries. It provides security, compliance, and observability as a middleware layer — sitting between agent orchestration frameworks (LangGraph, CrewAI, Google ADK) and the tools/services they access, enforcing RBAC, sandboxed execution, immutable audit logging, circuit breakers, and policy-as-code compliance rules. Financial services / credit risk is the flagship domain.
+AgentGuard is an **open-source, framework-agnostic agent governance and security runtime** for AI agents in regulated industries. It provides security, compliance, and observability as a middleware layer — sitting between agent orchestration frameworks (LangGraph, CrewAI, Google ADK) and the tools/services they access, enforcing RBAC, HMAC-chained audit logging, and circuit breakers on the governed call path today, with policy-as-code compliance, PII masking, HITL, and sandboxed execution implemented as offline tools that are being moved onto the runtime path (`docs/plans/guardrails-realignment.md`). Financial services / credit risk is the flagship domain.
 
 ---
 

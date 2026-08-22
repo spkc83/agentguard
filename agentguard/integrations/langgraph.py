@@ -54,7 +54,7 @@ class LangChainTool(Protocol):
 class GovernedLangGraphToolNode:
     """Governance-wrapped LangGraph tool node.
 
-    Drop-in replacement for LangGraph's ToolNode. Routes tool calls
+    Duck-typed wrapper (does not subclass LangGraph's ToolNode yet). Routes tool calls
     through the AgentGuard governance pipeline before execution.
 
     Args:

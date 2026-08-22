@@ -41,7 +41,7 @@ class McpSession(Protocol):
 class GovernedMcpClient:
     """Governance-wrapped MCP client.
 
-    Drop-in layer between your agent and an MCP session. Every tool call
+    Duck-typed layer between your agent and an MCP session. Every tool call
     goes through identity resolution, RBAC, circuit breaker, and audit
     logging before reaching the actual MCP server.
 

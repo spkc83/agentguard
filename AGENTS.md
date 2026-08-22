@@ -14,7 +14,7 @@ This file defines specialized agent roles for use with Claude Code's multi-agent
 **Owns:**
 - `agentguard/core/rbac.py` — permission model, role definitions, policy enforcement
 - `agentguard/core/audit.py` — immutable append-only audit logger
-- `agentguard/core/sandbox.py` — Docker/Wasm sandboxed execution engine
+- `agentguard/core/sandbox.py` — Docker sandboxed command runner (not yet on the governed call path; Wasm backend is roadmap)
 - `agentguard/core/circuit_breaker.py` — kill switches, rate limiting, breakers
 - `agentguard/core/identity.py` — agent identity, credentials, token management
 - `agentguard/exceptions.py` — all custom exception types
@@ -122,8 +122,7 @@ This file defines specialized agent roles for use with Claude Code's multi-agent
 - Every integration must have a working end-to-end example that passes CI without a real LLM (use a mock LLM responder)
 
 **Handoff contract (outputs):**
-- `GovernedTool` wrapper class — drop-in replacement for any framework's tool definition
-- `GovernedAgent` wrapper class — wraps any agent with AgentGuard governance
+- Per-framework governed wrappers — `GovernedLangGraphToolNode`, `GovernedCrewAITool`, `GovernedAdkTool`, `GovernedMcpClient`, `GovernedA2AClient` (duck-typed today; a generic `GovernedTool`/`GovernedAgent` facade is roadmap)
 - Integration test results — must include a tool-call intercept, a permission-denied case, and an audit log verification
 
 ---

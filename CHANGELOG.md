@@ -24,7 +24,10 @@ reaches 1.0.
   `TypeError`. `run_governed` accepts `resource: str | None` and denies (audited, sentinel
   `<unresolved>`) before consulting RBAC when the resource cannot be derived.
 - Derived resources are canonicalised (`canonicalize_resource`) before RBAC: fnmatch
-  metacharacters, `<>`, control characters, absolute paths and `..` traversal are rejected.
+  metacharacters, `<>`, control characters, absolute paths and any `..` segment (checked on the
+  raw value, before normalisation, so a namespace prefix can never be eaten) are rejected.
+- `GovernedA2AClient` canonicalises the target once and uses it for both the action and the
+  resource, so a cased target cannot evade an action-scoped deny rule.
 - `Permission.matches` uses `fnmatch.fnmatchcase`; resources match case-insensitively,
   actions case-sensitively. A case variant such as `Admin/keys` can no longer evade
   `deny admin/*`.

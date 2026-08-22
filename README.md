@@ -2,7 +2,7 @@
 
 **Framework-agnostic governance and security runtime for AI agents in regulated industries.**
 
-AgentGuard sits between your agent orchestration framework (LangGraph, CrewAI, Google ADK, or raw Python) and the tools/services your agents access. It enforces RBAC, immutable audit logging, sandboxed execution, circuit breakers, and policy-as-code compliance rules — so you can deploy AI agents in environments where security and regulatory compliance are non-negotiable.
+AgentGuard sits between your agent orchestration framework (LangGraph, CrewAI, Google ADK, or raw Python) and the tools/services your agents access. Today it enforces RBAC, HMAC-chained audit logging, and circuit breakers on every governed call; policy-as-code compliance checks, PII masking, human-in-the-loop escalation, and sandboxed execution exist as offline tools and are being moved onto the runtime path (see `docs/plans/guardrails-realignment.md`). The goal is a live guardrails engine for environments where security and regulatory compliance are non-negotiable.
 
 Financial services / credit risk is the flagship domain, with built-in support for ECOA adverse action notices, SR 11-7 model validation, and fairness analysis under the Fair Housing Act.
 
@@ -163,6 +163,7 @@ agentguard policy validate                    # List all loaded policy rules
 agentguard policy report --log-dir ./audit-logs  # Generate compliance report
 
 # Formal verification
+# The two `verify` commands need the Z3 extra: pip install 'agentguard[verify]'
 agentguard verify policy                      # Check policy consistency via Z3
 agentguard verify rbac --config rbac.yaml     # Verify RBAC escalation absence
 

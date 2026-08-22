@@ -131,3 +131,29 @@ def test_version_matches_readme() -> None:
 def test_py_typed_present() -> None:
     """PEP 561 marker file must exist so type checkers treat the package as typed."""
     assert (REPO_ROOT / "agentguard" / "py.typed").is_file()
+
+
+def test_wheel_ships_license_types_and_policies(tmp_path: Path) -> None:
+    """The built wheel must carry LICENSE, py.typed and the three policy bundles.
+
+    ``PolicyEngine`` loads its defaults from ``Path(__file__).parent / "policies"``;
+    if packaging ever drops the YAML files every default policy path silently
+    loads zero rules.
+    """
+    import subprocess
+    import sys
+    import zipfile
+
+    subprocess.run(  # noqa: S603 — fixed argv, no untrusted input
+        [sys.executable, "-m", "build", "--wheel", "--no-isolation", "--outdir", str(tmp_path)],
+        cwd=REPO_ROOT,
+        check=True,
+        capture_output=True,
+    )
+    wheels = list(tmp_path.glob("agentguard-*.whl"))
+    assert len(wheels) == 1, wheels
+    names = set(zipfile.ZipFile(wheels[0]).namelist())
+    assert "agentguard/py.typed" in names
+    for bundle in ("owasp_agentic", "finos_aigf_v2", "eu_ai_act"):
+        assert f"agentguard/compliance/policies/{bundle}.yaml" in names
+    assert any(n.endswith("/licenses/LICENSE") for n in names), sorted(names)

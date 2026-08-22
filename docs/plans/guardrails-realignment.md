@@ -303,3 +303,13 @@ Ordered so each phase is shippable, the five public adapters stay green througho
 6. A decline cannot be emitted without ≥1 valid, attributed, taxonomy-versioned reason code linked in evidence.
 7. Shadow mode exists before any domain guardrail is enabled.
 8. No dependency is declared that is not imported; no API is documented that does not exist; no claim is in the README that lacks a test.
+
+---
+
+## 9. Execution log
+
+| Date | Scope | Branch / commits | Evidence |
+|---|---|---|---|
+| 2026-08-22 | Phase 0 (PRs 0.1–0.5) + PR 1.1 | `fix/phase0-truth-and-hygiene` | 468 unit tests green, 93.9% coverage (core 92.7%, compliance 98.3%); ruff/mypy clean; all four examples run; bypass probes closed (omit → denied, supply → `TypeError`, `Admin/users` → denied, `*`/`..` → `<unresolved>` denied, A2A `../peer` and `Treasury-Agent` → denied). Approach and completion gates passed by fresh-context critics; blocking findings (traversal checked before normalisation, A2A action-axis canonicalisation, `pip-audit --strict`, SBOM `path:`, README/CLAUDE.md headline claims) fixed. Not verified locally: the new CI `integration` job (no Docker daemon here). |
+
+Open follow-ups raised at the completion gate (not blocking): unknown `agent_id` raises without an audit record (folds into PR 3.5); `_load_file` does not wrap YAML/validation errors in `PolicyLoadError` and ignores `*.yml`; async resolvers have no timeout and run outside the circuit breaker; `FileAuditBackend` requires a `Path`; direct `check_permission` callers get no canonicalisation (PR 3.1 moves it into the kernel); NFKC normalisation of resources not applied.

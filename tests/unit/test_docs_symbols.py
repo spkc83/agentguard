@@ -33,6 +33,8 @@ _TRUTH_CHECKED_FILES = sorted(
         *(p for p in (REPO_ROOT / "docs").rglob("*.md") if "plans" not in p.parts),
         REPO_ROOT / "ARCHITECTURE.md",
         REPO_ROOT / "CLAUDE.md",
+        REPO_ROOT / "README.md",
+        REPO_ROOT / "AGENTS.md",
     }
 )
 

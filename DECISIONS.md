@@ -308,7 +308,7 @@ pip install agentguard[all]         # everything
 ---
 
 ## ADR-015 — YAML policy-as-code with typed check handlers
-**Status:** Accepted
+**Status:** Accepted — partially superseded by ADR-022 (unknown check types now fail at load; custom handlers register via `extra_check_handlers`)
 **Date:** 2026-04-14
 
 **Context:** The compliance engine needs to evaluate audit events against policy rules loaded from YAML files. Rules need different evaluation strategies: some check action patterns, others scan for content, others require metadata fields.
@@ -318,7 +318,7 @@ pip install agentguard[all]         # everything
 **Consequences:**
 - Positive: YAML rules are readable by compliance officers, not just engineers
 - Positive: New check types can be added without modifying existing rules
-- Positive: Unknown check types pass safely (no silent failures, no crashes)
+- ~~Positive: Unknown check types pass safely (no silent failures, no crashes)~~ — reversed by ADR-022: this was fail-open
 - Negative: Less expressive than a full rule engine (no cross-event correlation)
 - Future: Consider OPA/Rego integration for organizations needing complex multi-condition rules
 
@@ -472,6 +472,8 @@ tracer starts emitting real spans automatically.
 - Positive: `agentguard policy validate` becomes a real gate — it now fails on a policy set the engine could not fully evaluate
 - Negative: Policy files that previously loaded with a bad check type now break the engine — this is intended, but it is a breaking change for any downstream policy set carrying such a rule
 - Negative (stated limitation): CLI users cannot register custom check types. `extra_check_handlers` is a Python API only, so a YAML policy set using a custom type is loadable from library code but not from `agentguard policy validate`. Custom types remain a programmatic-integration feature; adding a plugin entry-point mechanism for the CLI is deferred until there is demand.
+
+---
 
 ## ADR-023 — RBAC resource is derived by the integrator, never supplied by the agent
 **Status:** Accepted
