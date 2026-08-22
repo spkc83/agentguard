@@ -16,6 +16,7 @@ class TestFormalVerifier:
         Index 0 = tool:admin (admin only), Index 1 = tool:read (both).
         Without admin role, index 0 should be unreachable.
         """
+        pytest.importorskip("z3")
         roles = [
             Role(
                 name="analyst",
@@ -42,6 +43,7 @@ class TestFormalVerifier:
 
     def test_rbac_escalation_detected(self) -> None:
         """Verify that analyst role can reach its own permission (index 0)."""
+        pytest.importorskip("z3")
         roles = [
             Role(
                 name="analyst",
@@ -60,6 +62,7 @@ class TestFormalVerifier:
         assert "analyst" in result.counterexample
 
     def test_policy_consistency_no_contradictions(self) -> None:
+        pytest.importorskip("z3")
         rules = [
             {"id": "R1", "action_keyword": "read", "resource_keyword": "data", "effect": "allow"},
             {"id": "R2", "action_keyword": "write", "resource_keyword": "data", "effect": "allow"},
@@ -69,6 +72,7 @@ class TestFormalVerifier:
         assert result.status == "unsat"
 
     def test_policy_consistency_contradiction_found(self) -> None:
+        pytest.importorskip("z3")
         rules = [
             {"id": "R1", "action_keyword": "read", "resource_keyword": "data", "effect": "allow"},
             {"id": "R2", "action_keyword": "read", "resource_keyword": "data", "effect": "deny"},
@@ -80,6 +84,7 @@ class TestFormalVerifier:
 
     def test_workflow_safety_with_hitl(self) -> None:
         """Target is not reachable without HITL — safe."""
+        pytest.importorskip("z3")
         nodes = ["start", "hitl_review", "execute"]
         edges = [("start", "hitl_review"), ("hitl_review", "execute")]
         hitl_nodes = {"hitl_review"}
@@ -96,6 +101,7 @@ class TestFormalVerifier:
 
     def test_workflow_safety_without_hitl(self) -> None:
         """Target is reachable without HITL — unsafe."""
+        pytest.importorskip("z3")
         nodes = ["start", "process", "execute"]
         edges = [("start", "process"), ("process", "execute")]
         hitl_nodes: set[str] = set()
@@ -112,6 +118,7 @@ class TestFormalVerifier:
 
     def test_workflow_single_node(self) -> None:
         """A single node with no edges — target equals source but no path exists."""
+        pytest.importorskip("z3")
         verifier = FormalVerifier()
         result = verifier.verify_workflow_safety(
             nodes=["start", "end"],
@@ -124,12 +131,14 @@ class TestFormalVerifier:
         assert result.status == "unsat"
 
     def test_empty_policy_rules(self) -> None:
+        pytest.importorskip("z3")
         verifier = FormalVerifier()
         result = verifier.verify_policy_consistency([])
         assert result.status == "unsat"
 
     def test_workflow_unknown_when_source_or_target_missing(self) -> None:
         """Source or target absent from node list -> unknown, not raise."""
+        pytest.importorskip("z3")
         verifier = FormalVerifier()
         r1 = verifier.verify_workflow_safety(
             nodes=["a", "b"],
@@ -158,12 +167,13 @@ class TestFormalVerifier:
         documents the lazy-import contract established by ADR-013.
         """
         import ast
+        from pathlib import Path
 
         from agentguard.compliance import engine as engine_mod
         from agentguard.compliance import hitl as hitl_mod
 
         for mod in (engine_mod, hitl_mod):
-            src = open(mod.__file__).read()
+            src = Path(mod.__file__).read_text()
             tree = ast.parse(src)
             for node in ast.walk(tree):
                 if isinstance(node, ast.Import):

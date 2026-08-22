@@ -17,6 +17,8 @@ from agentguard.models import AgentIdentity, AuditEvent, PermissionContext
 if TYPE_CHECKING:
     from pathlib import Path
 
+pytest.importorskip("z3")
+
 runner = CliRunner()
 
 

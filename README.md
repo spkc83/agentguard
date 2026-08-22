@@ -6,42 +6,51 @@ AgentGuard sits between your agent orchestration framework (LangGraph, CrewAI, G
 
 Financial services / credit risk is the flagship domain, with built-in support for ECOA adverse action notices, SR 11-7 model validation, and fairness analysis under the Fair Housing Act.
 
-## Current Status: v1.0.0 (Production Release)
+## Current Status: v0.9.0 (Alpha)
 
-All 4 layers are implemented and tested:
+AgentGuard is being realigned from a governance decorator into a live guardrails engine — see [docs/plans/guardrails-realignment.md](docs/plans/guardrails-realignment.md) for the gap analysis and phased plan.
 
-| Component | Layer | Status | Description |
-|-----------|-------|--------|-------------|
-| Audit Logger | 1 | Done | HMAC-SHA256 chained, append-only, tamper-evident JSONL log |
-| Agent Identity | 1 | Done | In-memory and file-backed registries with atomic persistence |
-| RBAC Engine | 1 | Done | Deny-override semantics, role inheritance, wildcard matching |
-| Circuit Breaker | 1 | Done | CLOSED/OPEN/HALF_OPEN states + per-agent token bucket rate limiter |
-| Sandbox | 1 | Done | Docker container isolation + NoOp backend for dev/testing |
-| MCP Middleware | 1 | Done | `GovernedMcpClient` — full governance pipeline for MCP tool calls |
-| Policy Engine | 2 | Done | YAML policy-as-code evaluator with 6 check types |
-| OWASP Policies | 2 | Done | 10 rules covering OWASP Top 10 for Agentic AI |
-| FINOS Policies | 2 | Done | 15 rules from FINOS AI Governance Framework v2.0 |
-| EU AI Act Policies | 2 | Done | 10 rules covering Articles 9, 10, 13, 14, 17 |
-| Formal Verifier | 2 | Done | Z3 SMT solver — RBAC escalation, policy consistency, workflow safety |
-| HITL Escalation | 2 | Done | Callback-based human-in-the-loop with auto-approve/deny modes |
-| Compliance Reporter | 2 | Done | JSON and Markdown compliance attestation reports |
-| Credit Decisioning | 3 | Done | Configurable PD-based agent template with auto/review/decline bands |
-| Adverse Action | 3 | Done | ECOA/Reg B compliant notice generation with deterministic ordering |
-| Model Validation | 3 | Done | SR 11-7 aligned validation workflow with structured findings |
-| Fairness Analysis | 3 | Done | Disparate impact (4/5ths rule), equalized odds, calibration |
-| PII Detection | 3 | Done | SSN, account numbers, email, phone masking |
-| Synthetic Data | 3 | Done | Statistical generator + WGAN-GP (PyTorch) for credit data |
-| LangGraph Integration | 4 | Done | `GovernedLangGraphToolNode` — governed tool execution |
-| CrewAI Integration | 4 | Done | `GovernedCrewAITool` — governed CrewAI tool wrapper |
-| Google ADK Integration | 4 | Done | `GovernedAdkTool` — governed ADK tool wrapper |
-| A2A Middleware | 4 | Done | `GovernedA2AClient` — governed agent-to-agent messaging |
-| OTel Tracer | 4 | Done | OpenTelemetry-native agent decision traces with NoOp fallback |
-| Replay Debugger | 4 | Done | Audit log replay with filtering, timeline, and summarization |
-| Metrics Dashboard | 4 | Done | Denial rates, latency percentiles, agent activity, policy trends |
-| CLI | All | Done | `audit show/verify/replay`, `policy validate/report`, `verify rbac/policy` |
-| CI | All | Done | GitHub Actions: lint, type check, test (Python 3.11 + 3.12) |
+### Enforced at runtime
 
-**278 tests, 92% coverage.**
+Reachable from the governed call path today:
+
+| Component | Description |
+|-----------|-------------|
+| Audit Logger | HMAC-SHA256 chained, append-only JSONL log (truncation detection and multi-writer safety are planned) |
+| Agent Identity | In-memory and file-backed registries with atomic persistence |
+| RBAC Engine | Deny-override semantics, role inheritance, wildcard matching |
+| Circuit Breaker | CLOSED/OPEN/HALF_OPEN states + per-agent token bucket rate limiter |
+| Shared governance pipeline | Identity → RBAC → circuit breaker → audit → call, used by every adapter |
+
+### Offline analysis tools
+
+Run by CLI / reports — not yet on the runtime call path:
+
+| Component | Description |
+|-----------|-------------|
+| Policy Engine | YAML policy-as-code evaluator with 6 check types |
+| Policy bundles | OWASP Top 10 for Agentic AI (10 rules), 15 controls informed by FINOS AIGF v2.0 (unofficial mapping), EU AI Act high-risk (10 rules) |
+| Formal Verifier | Z3 SMT solver, RBAC model only — see ADR-013 caveat |
+| HITL Escalation | Callback-based human-in-the-loop primitives (auto-approve/deny modes) |
+| Compliance Reporter | JSON and Markdown compliance attestation reports |
+| Replay Debugger | Audit log replay with filtering, timeline, and summarization |
+| Metrics Dashboard | Denial rates, latency percentiles, agent activity, policy trends |
+| OTel Tracer | One OpenTelemetry span per governed call, with NoOp fallback |
+| Credit-risk toolkit | Decisioning template, adverse action notices, model validation, fairness analysis, PII masking, synthetic data generation |
+
+### Wrappers awaiting framework validation
+
+Duck-typed; import no framework code yet:
+
+| Component | Description |
+|-----------|-------------|
+| LangGraph | `GovernedLangGraphToolNode` |
+| CrewAI | `GovernedCrewAITool` |
+| Google ADK | `GovernedAdkTool` |
+| MCP | `GovernedMcpClient` |
+| A2A | `GovernedA2AClient` |
+
+Unit tests run with `pytest tests/unit/` (coverage gate: 80% in CI; current run is reported in the job log).
 
 ## Quickstart
 
@@ -111,19 +120,19 @@ Your Agent Application (LangGraph / CrewAI / ADK / Python)
                     v
         AgentGuard Runtime Middleware
         +----------------------------------+
-        | Layer 1: Security Runtime        |  v0.2.0 Done
+        | Layer 1: Security Runtime        |  Enforced at runtime
         |   RBAC, Identity, Audit,         |
         |   Circuit Breaker, Sandbox, MCP  |
         +----------------------------------+
-        | Layer 2: Compliance Engine       |  v0.3.0 Done
+        | Layer 2: Compliance Engine       |  Offline analysis tool
         |   Policy-as-Code, HITL, Z3,     |
         |   OWASP, FINOS, EU AI Act       |
         +----------------------------------+
-        | Layer 3: Domain Toolkit          |  v0.4.0 Done
+        | Layer 3: Domain Toolkit          |  Offline analysis tool
         |   Credit Risk, Adverse Action,   |
         |   Fairness, PII, Synthetic Data  |
         +----------------------------------+
-        | Layer 4: Integrations + Observe  |  v1.0.0 Done (current)
+        | Layer 4: Integrations + Observe  |  Wrappers / offline analysis
         |   LangGraph, CrewAI, ADK, A2A,  |
         |   OTel Traces, Replay, Metrics  |
         +----------------------------------+
@@ -157,7 +166,7 @@ agentguard policy report --log-dir ./audit-logs  # Generate compliance report
 agentguard verify policy                      # Check policy consistency via Z3
 agentguard verify rbac --config rbac.yaml     # Verify RBAC escalation absence
 
-# Observability (v1.0)
+# Observability
 agentguard observe dashboard --log-dir ./audit-logs  # Aggregate metrics (JSON/Markdown)
 agentguard observe replay    --log-dir ./audit-logs \
   --agent-id <uuid> --result denied           # Filtered replay with decision summaries
@@ -166,14 +175,20 @@ agentguard observe summary   --log-dir ./audit-logs  # Quick counts by result/ag
 
 ## Roadmap
 
-| Milestone | Version | Status | What |
-|-----------|---------|--------|------|
-| M0+M1 | v0.1.0 | **Done** | Audit logger, RBAC, identity, CLI |
-| M2 | v0.2.0 | **Done** | Circuit breaker, Docker sandbox, MCP middleware, file-backed registry |
-| M3 | v0.3.0 | **Done** | Compliance engine, Z3 formal verifier, OWASP/FINOS/EU AI Act policies |
-| M4 | v0.4.0 | **Done** | Credit risk domain toolkit, synthetic data, adverse action, fairness |
-| M5 | v0.5.0 | **Done** | LangGraph, CrewAI, Google ADK, A2A integrations |
-| M6 | v1.0.0 | **Done** | Observability (OTel tracer, replay debugger, metrics dashboard) |
+Milestones below track code landing in `main`, not independent releases — only
+`v0.2.0` has ever been tagged. The package version was `1.0.0` through M6 despite
+this; see [CHANGELOG.md](CHANGELOG.md) for the `0.9.0` correction and
+[docs/plans/guardrails-realignment.md](docs/plans/guardrails-realignment.md) for
+what's next.
+
+| Milestone | Code landed | Status | What |
+|-----------|-------------|--------|------|
+| M0+M1 | v0.1.0 | **Code complete** | Audit logger, RBAC, identity, CLI |
+| M2 | v0.2.0 (tagged) | **Code complete** | Circuit breaker, Docker sandbox, MCP middleware, file-backed registry |
+| M3 | — | **Code complete** | Compliance engine, Z3 formal verifier, OWASP/FINOS/EU AI Act policies |
+| M4 | — | **Code complete** | Credit risk domain toolkit, synthetic data, adverse action, fairness |
+| M5 | — | **Code complete** | LangGraph, CrewAI, Google ADK, A2A integrations |
+| M6 | — | **Code complete** | Observability (OTel tracer, replay debugger, metrics dashboard) |
 
 ## Development
 
