@@ -134,7 +134,7 @@ class TestAppendOnlyAuditLog:
 
     @pytest.mark.usefixtures("_set_audit_key")
     async def test_custom_backend_protocol_swap(self, tmp_audit_dir: Path) -> None:
-        """Any AuditBackend-conforming object can replace FileAuditBackend without modifying audit log code."""
+        """Any AuditBackend-conforming object can replace FileAuditBackend unchanged."""
 
         class InMemoryBackend:
             def __init__(self) -> None:

@@ -77,9 +77,7 @@ class TestAgentRegistry:
         import asyncio as _asyncio
 
         registry = AgentRegistry()
-        await _asyncio.gather(
-            *(registry.register(name=f"agent-{i}", roles=[]) for i in range(50))
-        )
+        await _asyncio.gather(*(registry.register(name=f"agent-{i}", roles=[]) for i in range(50)))
         agents = await registry.list_agents()
         assert len(agents) == 50
         assert len({a.agent_id for a in agents}) == 50
@@ -89,10 +87,7 @@ class TestAgentRegistry:
 
         registry = AgentRegistry()
         results = await _asyncio.gather(
-            *(
-                registry.register(name=f"a-{i}", roles=[], agent_id="shared")
-                for i in range(20)
-            ),
+            *(registry.register(name=f"a-{i}", roles=[], agent_id="shared") for i in range(20)),
             return_exceptions=True,
         )
         successes = [r for r in results if not isinstance(r, Exception)]
