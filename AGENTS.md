@@ -42,7 +42,7 @@ This file defines specialized agent roles for use with Claude Code's multi-agent
 **Owns:**
 - `agentguard/compliance/engine.py` — YAML policy evaluator, rule runner
 - `agentguard/compliance/policies/owasp_agentic.yaml` — OWASP Top 10 for Agentic AI
-- `agentguard/compliance/policies/finos_aigf_v2.yaml` — FINOS AI Governance Framework v2.0 (46 risks)
+- `agentguard/compliance/policies/finos_aigf_v2.yaml` — 15 controls informed by FINOS AI Governance Framework v2.0 (unofficial mapping)
 - `agentguard/compliance/policies/eu_ai_act.yaml` — EU AI Act high-risk requirements
 - `agentguard/compliance/hitl.py` — human-in-the-loop escalation patterns and callbacks
 - `agentguard/compliance/reporter.py` — compliance attestation report generator (PDF/JSON)
@@ -51,7 +51,7 @@ This file defines specialized agent roles for use with Claude Code's multi-agent
 **Key constraints:**
 - Policy files are the source of truth — engine evaluates them, never hardcodes rules
 - Each policy rule must have: `id`, `name`, `severity` (critical/high/medium/low), `description`, `check` (Python expression or jq-style selector), `remediation`
-- FINOS risk IDs must match the AIGF v2.0 spec exactly (e.g., `FINOS-AIGF-001` through `FINOS-AIGF-046`)
+- FINOS-aligned rules use AgentGuard-local IDs `AG-FINOS-NNN`; do not invent official FINOS `AIR-*` risk IDs — an official mapping requires domain review (Phase 4/5)
 - EU AI Act rules must reference the correct Article and Annex numbers
 - HITL escalation must be synchronous-safe (blocking) — it cannot be fire-and-forget
 
@@ -70,7 +70,7 @@ This file defines specialized agent roles for use with Claude Code's multi-agent
 - `agentguard/domains/finance/credit_risk/adverse_action.py` — adverse action notice generation (ECOA/Reg B compliant)
 - `agentguard/domains/finance/credit_risk/model_validation.py` — SR 11-7 model validation agent patterns
 - `agentguard/domains/finance/credit_risk/fairness.py` — disparate impact / disparate treatment analysis tools
-- `agentguard/domains/finance/credit_risk/red_team.py` — credit AI adversarial evaluation suite (bias probes, monotonicity checks)
+- `agentguard/domains/finance/credit_risk/red_team.py` — credit AI adversarial evaluation suite (bias probes, monotonicity checks) *(planned; file does not exist yet)*
 - `agentguard/domains/finance/synthetic/wgan_gp.py` — WGAN-GP tabular data generator
 - `agentguard/domains/finance/synthetic/generators.py` — high-level synthetic data API (credit applications, loan performance)
 - `agentguard/domains/finance/pii.py` — PII detection and masking (SSN, account#, routing#, DOB, full-name+address)
@@ -174,13 +174,13 @@ This file defines specialized agent roles for use with Claude Code's multi-agent
 **What it can formally verify:**
 1. **RBAC privilege escalation**: "Is there any sequence of role assignments that allows agent A to reach permission P without it being explicitly granted?" — encodes roles/permissions as bitvectors, checks satisfiability of forbidden states
 2. **Policy consistency**: "Does this set of policy rules contain contradictions (rules that can never fire) or redundancies (rules always superseded by others)?" — encodes rules as logical formulas, checks for unsatisfiability
-3. **Workflow safety properties**: "In this agent graph, can a node with role X ever reach a tool requiring permission Y without passing through a HITL node?" — encodes graph as reachability problem in Z3's fixed-point engine (µZ)
-4. **Monotonicity constraints**: "Does this credit scoring agent's decision boundary maintain monotonicity (higher income → lower risk score) across all possible inputs in a defined range?" — encodes as quantified arithmetic formula
-5. **Adverse action determinism**: "For any two identical applicant profiles, does this agent always produce the same adverse action reasons in the same order?" — encodes as functional consistency check
+3. **Workflow safety properties**: "In this agent graph, can a node with role X ever reach a tool requiring permission Y without passing through a HITL node?" — **implemented as a breadth-first graph search, not Z3** (ADR-016); Python API only
+4. **Monotonicity constraints** *(planned; not yet implemented)*: "Does this credit scoring agent's decision boundary maintain monotonicity (higher income → lower risk score) across all possible inputs in a defined range?" — would encode as a quantified arithmetic formula
+5. **Adverse action determinism** *(planned; not yet implemented)*: "For any two identical applicant profiles, does this agent always produce the same adverse action reasons in the same order?" — would encode as a functional consistency check
 
 **Handoff contract (outputs):**
 - `VerificationResult`: `{property, status: sat|unsat|timeout|unknown, counterexample?, proof_certificate?}`
-- CLI: `agentguard verify rbac --config policy.yaml`, `agentguard verify workflow --graph graph.json`
+- CLI: `agentguard verify rbac --config policy.yaml`, `agentguard verify policy --policy-dir <dir>` (these two are the whole `verify` group)
 - `VerificationReport` — full formal verification attestation document for regulatory submission
 
 ---

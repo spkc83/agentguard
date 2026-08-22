@@ -2,7 +2,15 @@
 
 ## System Overview
 
-AgentGuard is a **governance middleware** — it does not orchestrate agents; it governs them. Every agent action (tool call, inter-agent message, external API call) passes through AgentGuard's runtime before execution. The architecture is a four-layer stack that can be adopted incrementally: a team can start with Layer 1 (security) alone and add compliance, domain toolkits, and observability over time.
+AgentGuard is a **governance middleware** — it does not orchestrate agents; it governs them. Every agent action (tool call, inter-agent message, external API call) routed through an AgentGuard adapter passes through its runtime before execution. The architecture is a four-layer stack that can be adopted incrementally: a team can start with Layer 1 (security) alone and add compliance, domain toolkits, and observability over time.
+
+> **Read this first.** This document describes both what is implemented and what the
+> architecture is designed to support. Only Layer 1's identity, RBAC, audit, and
+> circuit breaker are on the governed call path today; Layers 2–4 are offline tools
+> driven by the CLI, the reporter, or your own code. Items that do not exist yet are
+> collected in [Roadmap — not yet implemented](#roadmap--not-yet-implemented) and
+> flagged inline as **(roadmap)**. The gap analysis behind those flags is
+> [`docs/plans/guardrails-realignment.md`](docs/plans/guardrails-realignment.md).
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -46,6 +54,9 @@ The security runtime is the load-bearing foundation. Every other layer depends o
 
 ### Execution Flow
 
+Steps marked **(roadmap)** are part of the target design but are *not* performed by
+`agentguard.integrations._pipeline.run_governed` today.
+
 ```
 Agent calls tool
        │
@@ -58,7 +69,7 @@ Agent calls tool
        ├── DENIED → write AuditEvent(result="denied") → raise PermissionDeniedError
        │
        ▼
-3. evaluate_policies(permission_ctx) → list[PolicyResult]
+3. evaluate_policies(permission_ctx) → list[PolicyResult]        (roadmap)
        │
        ├── CRITICAL violation → write AuditEvent(result="denied") → raise PolicyViolationError
        ├── HITL required → write AuditEvent(result="escalated") → await human_approval()
@@ -67,13 +78,22 @@ Agent calls tool
 4. write AuditEvent(result="allowed", policy_results=...)   ← LOG BEFORE EXECUTION
        │
        ▼
-5. execute_in_sandbox(tool, args)    → SandboxResult
+5. circuit_breaker.call(executor)    → result
        │
-       ├── Sandbox error → write AuditEvent(result="error") → raise SandboxError
+       ├── Executor error → write AuditEvent(result="error") → re-raise
        │
        ▼
-6. return SandboxResult to agent
+6. return result to agent
 ```
+
+**Step 3 is planned — Phase 1.3.** `PolicyEngine` is not called by `run_governed`;
+events written by the pipeline always carry `policy_results: []`, and no code path
+emits `result="escalated"`. Policy evaluation happens after the fact, when the CLI or
+`ComplianceReporter` replays the audit log.
+
+**Step 5 executes an in-process callable**, not a sandbox. The sandbox backends in
+`core/sandbox.py` run a `list[str]` command as a subprocess or container and are not
+reachable from the governed path (roadmap — see Phase 5.3).
 
 ### RBAC Model
 
@@ -100,19 +120,21 @@ Permission resolution uses **deny-override**: if any matching permission has `ef
 
 ### Sandbox Design
 
-Two execution backends (pluggable via `SandboxBackend` protocol):
+Two execution backends, pluggable via the `SandboxBackend` protocol. Both take a
+`list[str]` command and return a `SandboxResult`. **Neither is reachable from
+`run_governed`** — the governed path executes an in-process callable, so "sandboxed
+execution" is available as a standalone utility only (roadmap — Phase 5.3).
 
-**Docker backend (default):**
-- Each tool execution runs in a fresh container based on a minimal image
-- Network access is opt-in per tool definition
-- File system access is restricted to a mount-per-call temporary volume
-- CPU and memory limits enforced via Docker resource constraints
-- Execution timeout: configurable per tool, default 30 seconds
+**`DockerSandboxBackend`:**
+- Each execution runs in a fresh container from a caller-supplied image
+- Applies `network_disabled` and `mem_limit` from `SandboxConfig`
+- Execution timeout, default 30 seconds
+- Hardening flags (`read_only`, non-root `user`, `cap_drop=ALL`, `no-new-privileges`,
+  `pids_limit`, CPU quota) and per-call volume mounts are **roadmap**
 
-**Wasm backend (lightweight, optional):**
-- Uses `wasmtime-py` for near-native sandboxing without Docker overhead
-- Suitable for pure-Python tools with no system call requirements
-- Faster cold start; lower isolation guarantee than Docker
+**`NoOpSandboxBackend`:**
+- Direct `asyncio.create_subprocess_exec` with timeout enforcement, no isolation
+- Development and testing only; never `shell=True`
 
 ### Audit Log
 
@@ -122,18 +144,36 @@ Append-only, tamper-evident log using HMAC chain:
 AuditEvent N:  { ...event data..., prev_hash: HMAC(event N-1), hash: HMAC(event N) }
 ```
 
-Storage backends (pluggable):
-- **File** (default): JSONL file, rotated daily, compressed
-- **S3/GCS**: for production deployments
-- **PostgreSQL**: optional, via `agentguard[postgres]` install
+Storage backends are pluggable via the `AuditBackend` protocol. **`FileAuditBackend`
+(daily-rotated JSONL) is the only implementation that ships.** Remote and database
+backends are roadmap items; there is no `agentguard[postgres]` extra.
 
 The audit log is never the first place a write fails. If the log write fails, the action is blocked.
+
+Two integrity limitations are known and tracked (Phase 2): `verify_chain()` does not
+detect truncation of the tail (no sequence numbers or signed head), and the HMAC
+signing key is held by the audited process itself.
 
 ---
 
 ## Layer 2: Compliance Engine
 
-The compliance engine evaluates a set of YAML-defined policy rules against every `AuditEvent`. It is separate from RBAC (which is about *who can do what*) — compliance is about *whether what was done meets regulatory standards*.
+The compliance engine evaluates a set of YAML-defined policy rules against `AuditEvent`
+records. It is separate from RBAC (which is about *who can do what*) — compliance is
+about *whether what was done meets regulatory standards*.
+
+**It runs offline, over a written log — not before execution.** `PolicyEngine` is
+invoked by `agentguard policy validate|report`, by the `verify` commands, and by
+`ComplianceReporter`; it is not called by `run_governed`, and `PolicyResult` has no
+`deny` vocabulary, only `passed: bool`. Putting the engine on the hot path with an
+`allow | deny | escalate | warn` effect is planned — Phase 1.3. Until then a failing
+rule is a finding in a report, not a blocked action.
+
+The bundles are also uneven in what they can actually detect: of the 35 shipped rules,
+9 match patterns against the real action/resource strings, 10 check only that a key is
+present in caller-supplied identity metadata (values are never read), and 16 evaluate
+the event's `result`/`granted` fields. See
+[`docs/compliance/index.md`](docs/compliance/index.md) for the per-bundle breakdown.
 
 ### Policy Rule Schema
 
@@ -173,10 +213,12 @@ The compliance engine evaluates a set of YAML-defined policy rules against every
 - OWASP-AGENT-09: Insecure Output Handling
 - OWASP-AGENT-10: Model Denial of Service
 
-**FINOS AIGF v2.0** (`policies/finos_aigf_v2.yaml`):
-- 46 risks mapped across: Governance, Risk Management, Technology, Operations
-- Key risk IDs: FINOS-AIGF-001 (Model Risk) through FINOS-AIGF-046 (Vendor Concentration)
-- Maps to SR 11-7 (Fed model risk management guidance) requirements
+**FINOS AIGF v2.0-aligned controls** (`policies/finos_aigf_v2.yaml`):
+- 15 controls informed by FINOS AIGF v2.0, spanning Governance, Risk Management,
+  Technology, and Operations themes
+- Rule IDs are AgentGuard-local (`AG-FINOS-NNN`); this is **not** an official mapping
+  to the FINOS risk registry (`AIR-*` IDs). An official mapping requires domain review.
+- Several controls reference SR 11-7 (Fed model risk management guidance) themes
 
 **EU AI Act** (`policies/eu_ai_act.yaml`):
 - Annex III High-Risk AI: credit scoring (Article 6)
@@ -188,21 +230,28 @@ The compliance engine evaluates a set of YAML-defined policy rules against every
 
 ### Human-in-the-Loop Escalation
 
-HITL is triggered when:
-1. A policy rule has `requires_human_approval: true`
-2. A circuit breaker threshold is approaching (warning zone)
-3. An action is in an agent's `escalation_required` scope
-
-HITL implementation is **callback-based** — AgentGuard provides the escalation event; the caller provides the approval handler:
+HITL implementation is **callback-based** — `HitlManager` builds a `HitlEscalation` and
+hands it to a handler you supply, which returns an `ApprovalDecision`:
 
 ```python
+from agentguard.compliance.hitl import ApprovalDecision, HitlEscalation, HitlManager
+
+
 async def my_approval_handler(escalation: HitlEscalation) -> ApprovalDecision:
     # Send to Slack, PagerDuty, internal workflow system
-    # Return ApprovalDecision(approved=True/False, approver_id="...", reason="...")
-    ...
+    return ApprovalDecision(approved=True, approver_id="...", reason="...")
 
-guard = AgentGuard(hitl_handler=my_approval_handler)
+
+manager = HitlManager(handler=my_approval_handler)
 ```
+
+**Nothing in AgentGuard calls `HitlManager` (roadmap — Phase 3.4.)** There is no
+`AgentGuard` facade class, no automatic escalation trigger, no pending-approval state,
+no timeout, and no persistence across a restart; no code path writes an
+`result="escalated"` audit event, so the dashboard's escalation counter is always zero.
+Escalation triggers on policy `requires_human_approval`, on circuit-breaker warning
+zones, and on a per-agent `escalation_required` scope are all part of the target
+design, not the current one.
 
 ### Formal Policy Verification (Z3 SMT Solver)
 
@@ -225,36 +274,33 @@ Prove: ∀ rules r₁, r₂ ∈ policy_set:
 ```
 Detects contradictions and redundant rules before deployment.
 
-**Property 3 — Workflow Safety (µZ fixed-point engine):**
+**Property 3 — Workflow Safety:**
 ```
-Prove: ∀ execution paths P in agent graph G:
+Check: ∀ execution paths P in agent graph G:
   (node_with_role(X) ∈ P) ∧ (tool_requiring(Y) ∈ P)
   → ∃ hitl_node ∈ P between them
 ```
-Uses Z3's Datalog/µZ engine for reachability queries on directed graphs.
+`verify_workflow_safety` implements this as a **breadth-first search over the directed
+graph** — it contains no Z3 at all (ADR-016). It is a graph check, not a proof, and it
+is exposed through the Python API only; there is no `verify` CLI subcommand for it.
 
-**Property 4 — Credit Model Monotonicity (for credit risk domain):**
-```
-Prove: ∀ input pairs (x₁, x₂) where x₁.income > x₂.income ∧ all_else_equal:
-  credit_score(x₁) ≥ credit_score(x₂)
-```
-Encodes model decision boundaries as piecewise-linear Z3 arithmetic formulas.
-
-**Property 5 — Adverse Action Determinism:**
-```
-Prove: ∀ applicant profiles p where p₁ = p₂:
-  adverse_action_reasons(p₁) = adverse_action_reasons(p₂) (same set, same order)
-```
+Properties 4 (credit model monotonicity) and 5 (adverse action determinism) are
+**roadmap** — no monotonicity or determinism encoding exists in `agentguard/`.
 
 All verification results produce a `VerificationResult` with status `sat | unsat | timeout | unknown`. When SAT (property violated), Z3's counterexample is translated back to human-readable AgentGuard terms. Verification timeout defaults to 10 seconds.
 
 ```bash
-# CLI usage
+# CLI usage — these two subcommands are the whole `verify` group
 agentguard verify rbac --config rbac_config.yaml
-agentguard verify workflow --graph agent_graph.json --property no-pii-without-hitl
-agentguard verify policy --file policies/finos_aigf_v2.yaml --check consistency
-agentguard verify model --module credit_scorer --property monotonicity --feature income
+agentguard verify policy --policy-dir agentguard/compliance/policies
 ```
+
+Two soundness caveats apply to what ships today, both tracked in Phase 5.2: the RBAC
+encoding indexes exact `(action, resource)` pairs rather than modelling `fnmatch`
+subsumption and role inheritance, so a `tool:*` grant the runtime expands is invisible
+to it; and the policy-consistency encoding treats rule conditions as unconstrained
+strings, which makes the satisfiability question close to vacuous. Treat both as
+lint-grade signals, not as proofs, until that PR lands.
 
 ---
 
@@ -286,10 +332,12 @@ Application Received
                                with deterministic reason ordering
 ```
 
-**Formal verification hook:** Before deployment, `agentguard verify workflow` proves that:
-- No application can be auto-declined without the adverse action generator running
-- No PII leaves the sandboxed bureau pull without being masked in the audit log
-- The decision boundary is monotone with respect to FICO score and DTI ratio
+**Roadmap — formal verification hook.** The target design gates deployment on proofs
+that no application can be auto-declined without the adverse action generator running,
+that no PII leaves the bureau pull unmasked, and that the decision boundary is monotone
+in FICO score and DTI ratio. None of these checks exists; the graph above is also a
+design sketch — `CreditDecisioningAgent` is a synchronous threshold function that holds
+no governance references and issues no HITL escalation.
 
 ### Adverse Action Notice Generator
 
@@ -298,7 +346,7 @@ ECOA and Regulation B require that when credit is denied (or offered on less fav
 - Accepts the PD model's feature importance output
 - Ranks adverse factors by contribution magnitude
 - Maps model features to consumer-readable reason codes (FCRA-standardized where applicable)
-- Ensures deterministic ordering (verified by Z3 property 5)
+- Ensures deterministic ordering via an explicit tie-break (not formally verified)
 - Produces `AdverseActionNotice` Pydantic model with: applicant_id, decision, reasons (ordered list), creditor_info, disclosure_text
 
 ### SR 11-7 Model Validation Agent
@@ -380,24 +428,40 @@ audit log so there is no second source of truth:
 
 ### OpenTelemetry Semantic Conventions
 
-AgentGuard defines custom span attributes under the `agentguard.*` namespace:
+AgentGuard defines custom span attributes under the `agentguard.*` namespace.
+
+**Emitted today.** A governed call produces exactly **one** span,
+`agentguard.tool_call`, with four attributes:
 
 ```
-agentguard.agent.id              string   UUID of the acting agent
-agentguard.agent.name            string   Human-readable name
+agentguard.agent_id              string   The acting agent's id
 agentguard.action                string   The tool/action invoked
-agentguard.resource              string   Target resource
+agentguard.resource              string   Target resource (caller-asserted)
+agentguard.trace_id              string   Correlation id minted per call
+```
+
+**Roadmap — planned attributes and child spans.** The naming below is the target
+convention (dotted sub-namespaces, e.g. `agent.id` rather than `agent_id`), and none
+of it is emitted yet. Planned child spans: `agentguard.rbac_check`,
+`agentguard.policy_eval`, `agentguard.audit_write`.
+
+```
+agentguard.agent.name            string   Human-readable name
 agentguard.permission.granted    bool
 agentguard.permission.reason     string
 agentguard.policy.violations     int      Count of policy violations
 agentguard.policy.critical       bool     Any critical violations
-agentguard.sandbox.backend       string   "docker" | "wasm" | "none"
+agentguard.sandbox.backend       string   "docker" | "none"
 agentguard.sandbox.duration_ms   float
 agentguard.cost.tokens           int      Total LLM tokens in this trace
 agentguard.cost.usd              float    Estimated cost
 agentguard.hitl.required         bool
 agentguard.hitl.approved         bool
 ```
+
+`AgentTracer.trace_rbac_check`, `trace_policy_evaluation`, and `trace_tool_call` exist
+but have no callers; the pipeline builds its span directly. They are slated for
+deletion or wiring in Phase 2.4.
 
 `AgentTracer` is lazily imported — if `opentelemetry-sdk` is not installed,
 all spans become no-ops and the governance pipeline runs with zero
@@ -465,7 +529,6 @@ client = GovernedMcpClient(
     session=mcp_session,
     agent_id=agent.agent_id,
     registry=registry, rbac_engine=engine, audit_log=audit,
-)
 result = await client.call_tool("web_search", {"query": "..."})
 ```
 
@@ -496,31 +559,39 @@ relationships.
 
 ## Security Threat Model
 
-Primary threats and mitigations:
+Primary threats and the mitigation each one is *designed* to have. The status column is
+the honest part: only one row is fully mitigated on the governed path today.
 
-| Threat | Vector | Mitigation |
-|--------|--------|------------|
-| Prompt injection | User input → agent prompt → tool args | Content scanning policy (OWASP-AGENT-01) |
-| Privilege escalation | Agent requests higher-permission tool | RBAC deny-override; no self-grant |
-| Sandbox escape | Tool binary escapes Docker/Wasm | Minimal base images; seccomp profiles; read-only FS |
-| Audit log tampering | Attacker modifies past events | HMAC chain; append-only storage |
-| HITL bypass | Agent retries without waiting for approval | Circuit breaker blocks retries during pending approval |
-| Data exfiltration | Agent leaks PII via tool calls | PII detection policy; network egress control in sandbox |
-| Tool poisoning | Malicious tool definition injected | Tool registry with signature verification |
-| Credential theft | Agent accesses secrets it shouldn't | Vault integration; short-lived tokens per sandbox |
+| Threat | Vector | Intended mitigation | Status |
+|--------|--------|---------------------|--------|
+| Privilege escalation | Agent requests higher-permission tool | RBAC deny-override; no self-grant | **Partial** — enforced, but the `resource` is asserted by the caller and defaults to `*`, so a deny rule fires only when the caller volunteers the incriminating label (Phase 1.1) |
+| Audit log tampering | Attacker modifies past events | HMAC chain; append-only storage | **Partial** — mid-chain edits are detected; tail truncation is not, and the signing key lives in the audited process (Phase 2.1–2.2) |
+| Prompt injection | User input → agent prompt → tool args | Content scanning policy (OWASP-AGENT-01) | **Not mitigated** — the policy engine is offline and tool args never reach it (Phase 1.3) |
+| Data exfiltration | Agent leaks PII via tool calls | PII detection; sandbox egress control | **Not mitigated** — `pii.py` has no call sites in `agentguard/`; results are returned verbatim (Phase 1.4) |
+| Sandbox escape | Tool escapes the container | Minimal base images; seccomp profiles; read-only FS | **Not mitigated** — the sandbox is off the governed path, and seccomp / read-only FS are roadmap (Phase 5.3) |
+| HITL bypass | Agent retries without waiting for approval | Breaker blocks retries during pending approval | **Not mitigated** — no escalation is ever raised (Phase 3.4) |
+| Agent impersonation | Caller asserts another agent's id | Verified short-lived workload credentials | **Not mitigated** — `resolve()` is a dict lookup on a self-asserted string (Phase 3.5) |
+| Tool poisoning | Malicious tool definition injected | Tool registry with signature verification | **Roadmap** — no tool registry or signing exists |
+| Credential theft | Agent accesses secrets it shouldn't | Vault integration; short-lived per-sandbox tokens | **Roadmap** — no secrets-manager integration exists |
+
+Two further caveats that are properties of the design rather than of any one threat:
+the adapters wrap a callable the caller still holds, so calling the raw tool bypasses
+governance entirely; and a guardrail bypass is only as strong as the boundary the
+application chooses to route through.
 
 ---
 
 ## Deployment Patterns
 
-**Pattern 1 — Library (embedded):**
-AgentGuard runs in-process with the agent application. Simplest deployment; suitable for single-machine agent systems.
+**Pattern 1 — Library (embedded).** *The only supported pattern.*
+AgentGuard runs in-process with the agent application. Suitable for single-machine
+agent systems. Note that in-process governance is advisory with respect to the
+application itself: the audited process holds the audit signing key, and code in that
+process can call the wrapped tool directly.
 
-**Pattern 2 — Sidecar:**
-AgentGuard runs as a sidecar container alongside the agent application. Tool calls are proxied through AgentGuard's local HTTP endpoint. Suitable for containerized deployments.
-
-**Pattern 3 — Gateway:**
-AgentGuard runs as a standalone governance gateway. All agent applications in an organization route tool calls through it. Enables centralized audit, compliance reporting, and policy management. Suitable for enterprise deployments with multiple agent teams.
+**Patterns 2 and 3 — sidecar and gateway — are roadmap.** No HTTP surface, proxy,
+server, or control plane ships in this package; there is nothing to deploy as a
+sidecar or gateway today. They are described in the Roadmap section below.
 
 ---
 
@@ -531,3 +602,68 @@ AgentGuard runs as a standalone governance gateway. All agent applications in an
 - **`agentguard.domains.*`**: Beta — may change in minor versions; domain modules are versioned independently
 - **`agentguard.integrations.*`**: Stable in v1.0 — public adapter classes and constructor signatures are frozen. The ``_pipeline`` helper is private.
 - **`agentguard.observability.*`**: Stable in v1.0 — `AgentTracer`, `ReplayDebugger`, and `MetricsDashboard` APIs are frozen.
+
+---
+
+## Roadmap — not yet implemented
+
+Everything in this table is described elsewhere in this document as part of the target
+architecture and **does not exist in the shipped package**. Phase numbers refer to
+[`docs/plans/guardrails-realignment.md`](docs/plans/guardrails-realignment.md) §6.
+
+### Layer 1 — Security runtime
+
+| Item | Status | Phase |
+|---|---|---|
+| Wasm sandbox backend (`wasmtime-py`) | Not started. No `wasmtime` import exists anywhere in the package. | — |
+| Sandbox on the governed path | `run_governed` executes an in-process callable; the sandbox backends take a `list[str]` command. The two APIs are disjoint. | 5.3 |
+| Docker hardening (`read_only`, non-root `user`, `cap_drop=ALL`, `no-new-privileges`, `pids_limit`, CPU quota, seccomp profile) | Not started. The backend sets only `network_disabled` and `mem_limit`. | 5.3 |
+| Per-call temporary volume mounts and per-tool network opt-in | Not started. | 5.3 |
+| S3 / GCS audit backends | Not started. `FileAuditBackend` is the only implementation. | — |
+| PostgreSQL audit backend and an `agentguard[postgres]` extra | Not started. No such extra exists, and a core DB dependency is explicitly out of scope per CLAUDE.md. | — |
+| Truncation-resistant audit chain (monotonic sequence numbers, signed head checkpoint, `flock` + `fsync`) | Not started. Deleting the tail of the log still verifies clean. | 2.1 |
+| Out-of-process signing (`SigningAuditBackend`, KMS/collector) | Not started. The audited process holds the HMAC key. | 2.2 |
+| Rate limiting on the governed path | `TokenBucketRateLimiter` exists and is tested but has no caller. | 1.5 |
+| Agent authentication (signed short-lived workload credentials) | Not started. `agent_id` is self-asserted. | 3.5 |
+| Derived, non-caller-asserted RBAC resources (`ResourceResolver`) | Not started. | 1.1 |
+
+### Layer 2 — Compliance
+
+| Item | Status | Phase |
+|---|---|---|
+| `AgentGuard` facade class with `hitl_handler=` | **No such class exists.** Adapters are constructed with explicit dependencies. | 5.4 |
+| Policy evaluation on the hot path, with `allow \| deny \| escalate \| warn` effects | Not started. `PolicyResult` has only `passed: bool`; pipeline events carry `policy_results: []`. | 1.3 |
+| HITL wiring: escalation triggers, pending state, timeouts, persistence, `escalated` audit events | Not started. `HitlManager` has zero call sites. | 3.4 |
+| Property 4 — credit model monotonicity proof | Not started. No monotonicity encoding exists. | — |
+| Property 5 — adverse action ordering proof | Not started. Ordering is enforced by a sort tie-break, not proven. | — |
+| Z3 Datalog/µZ workflow reachability | Not planned. `verify_workflow_safety` is a BFS and stays one (ADR-016). | — |
+| Sound RBAC encoding (fnmatch subsumption, role inheritance) and a differential test against `RBACEngine` | Not started. The current encoding indexes exact `(action, resource)` pairs. | 5.2 |
+| Official FINOS AIR-\* risk mapping | Not started. Rule IDs are AgentGuard-local `AG-FINOS-NNN`. | 4/5 |
+| Reporter verifying the chain before attesting | Not started. `ComplianceReporter` never calls `verify_chain()`. | 2.3 |
+
+### CLI
+
+| Item | Status | Phase |
+|---|---|---|
+| `verify` subcommand for workflow safety | Not implemented. The `verify` group is `rbac` and `policy` only; workflow safety is Python-API only. | — |
+| `verify` subcommand for model properties (monotonicity) | Not implemented; depends on Property 4. | — |
+| `sandbox` command group | Not implemented. There is no `sandbox` group. | — |
+
+### Layer 4 and operations
+
+| Item | Status | Phase |
+|---|---|---|
+| Child spans (`rbac_check`, `policy_eval`, `audit_write`) and the full attribute set | Not started. One span, four attributes. | 2.4 |
+| Real `duration_ms` on successful calls | Not started. Allowed events hard-code `0.0`, so latency percentiles reflect failures only. | 1.5 |
+| Metrics endpoint (`/metrics`, Prometheus, OTel instruments) | Not started. | 2.4 |
+| Replay as re-evaluation against a pinned policy bundle | Not started. `ReplayDebugger` filters and prints. | — |
+| Sidecar deployment (HTTP proxy endpoint) | Not started. No HTTP surface ships. | — |
+| Gateway deployment (standalone governance service, central policy management) | Not started. | — |
+| Tool registry with signature verification | Not started. | — |
+| Vault / secrets-manager integration, short-lived per-sandbox tokens | Not started. | — |
+
+### Adapters
+
+| Item | Status | Phase |
+|---|---|---|
+| Validation against the real LangGraph / CrewAI / Google ADK / MCP packages | Not started. The adapters import no framework and are tested against mocks; signatures do not yet match the frameworks' native tool interfaces. | 5.1 |

@@ -1,12 +1,13 @@
-name: "FINOS AI Governance Framework v2.0"
+name: "FINOS AIGF v2.0-aligned controls (unofficial mapping)"
 version: "2.0"
 description: >
-  Policy rules based on the FINOS AI Governance Framework v2.0.
-  46 risks mapped across Governance, Risk Management, Technology, and Operations.
-  Priority subset: top 15 rules for v0.3.
+  15 controls informed by FINOS AIGF v2.0, covering Governance, Risk Management,
+  Technology, and Operations themes. Rule IDs are AgentGuard-local (AG-FINOS-NNN);
+  they are not FINOS AIR-* risk IDs and this bundle is not an official mapping to
+  the FINOS risk registry. An official mapping requires domain review.
 
 rules:
-  - id: FINOS-AIGF-001
+  - id: AG-FINOS-001
     name: Model Risk Management
     severity: critical
     description: >
@@ -21,7 +22,7 @@ rules:
     references:
       - https://github.com/finos/ai-governance-framework
 
-  - id: FINOS-AIGF-002
+  - id: AG-FINOS-002
     name: Data Quality and Governance
     severity: high
     description: >
@@ -36,7 +37,7 @@ rules:
     references:
       - https://github.com/finos/ai-governance-framework
 
-  - id: FINOS-AIGF-003
+  - id: AG-FINOS-003
     name: Explainability and Transparency
     severity: high
     description: >
@@ -51,7 +52,7 @@ rules:
     references:
       - https://github.com/finos/ai-governance-framework
 
-  - id: FINOS-AIGF-004
+  - id: AG-FINOS-004
     name: Fairness and Bias
     severity: critical
     description: >
@@ -66,7 +67,7 @@ rules:
     references:
       - https://github.com/finos/ai-governance-framework
 
-  - id: FINOS-AIGF-005
+  - id: AG-FINOS-005
     name: Human Oversight
     severity: critical
     description: >
@@ -85,7 +86,7 @@ rules:
     references:
       - https://github.com/finos/ai-governance-framework
 
-  - id: FINOS-AIGF-008
+  - id: AG-FINOS-008
     name: Operational Resilience
     severity: high
     description: >
@@ -100,7 +101,7 @@ rules:
     references:
       - https://github.com/finos/ai-governance-framework
 
-  - id: FINOS-AIGF-010
+  - id: AG-FINOS-010
     name: Audit Trail Completeness
     severity: critical
     description: >
@@ -115,7 +116,7 @@ rules:
     references:
       - https://github.com/finos/ai-governance-framework
 
-  - id: FINOS-AIGF-012
+  - id: AG-FINOS-012
     name: Third-Party Risk
     severity: high
     description: >
@@ -133,7 +134,7 @@ rules:
     references:
       - https://github.com/finos/ai-governance-framework
 
-  - id: FINOS-AIGF-015
+  - id: AG-FINOS-015
     name: Privacy and Data Protection
     severity: critical
     description: >
@@ -152,7 +153,7 @@ rules:
     references:
       - https://github.com/finos/ai-governance-framework
 
-  - id: FINOS-AIGF-018
+  - id: AG-FINOS-018
     name: Model Validation
     severity: high
     description: >
@@ -167,7 +168,7 @@ rules:
     references:
       - https://github.com/finos/ai-governance-framework
 
-  - id: FINOS-AIGF-022
+  - id: AG-FINOS-022
     name: Concentration Risk
     severity: medium
     description: >
@@ -182,7 +183,7 @@ rules:
     references:
       - https://github.com/finos/ai-governance-framework
 
-  - id: FINOS-AIGF-025
+  - id: AG-FINOS-025
     name: Change Management
     severity: medium
     description: >
@@ -200,7 +201,7 @@ rules:
     references:
       - https://github.com/finos/ai-governance-framework
 
-  - id: FINOS-AIGF-030
+  - id: AG-FINOS-030
     name: Incident Management
     severity: high
     description: >
@@ -215,7 +216,7 @@ rules:
     references:
       - https://github.com/finos/ai-governance-framework
 
-  - id: FINOS-AIGF-035
+  - id: AG-FINOS-035
     name: Regulatory Reporting
     severity: high
     description: >
@@ -230,7 +231,7 @@ rules:
     references:
       - https://github.com/finos/ai-governance-framework
 
-  - id: FINOS-AIGF-040
+  - id: AG-FINOS-040
     name: Ethical AI Use
     severity: medium
     description: >

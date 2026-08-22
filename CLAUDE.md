@@ -50,7 +50,7 @@ agentguard/
 │   │   └── google_adk.py        # GovernedAdkTool — governed ADK tool wrapper
 │   └── cli.py                   # `agentguard` CLI entry point
 ├── tests/
-│   ├── unit/                    # Fast unit tests (278 tests, 92% coverage)
+│   ├── unit/                    # Fast unit tests (count/coverage reported by CI; do not pin here)
 │   ├── integration/             # Docker sandbox integration tests
 │   └── red_team/                # Adversarial sandbox escape tests
 ├── examples/
@@ -158,8 +158,7 @@ pytest --cov=agentguard --cov-report=html
 # CLI
 agentguard --help
 agentguard audit show --agent-id <id>
-agentguard policy validate --file policies/custom.yaml
-agentguard sandbox run --tool <tool_name>
+agentguard policy validate --policy-dir policies/
 
 # Build distribution
 python -m build
@@ -211,7 +210,7 @@ The owner has 17 years of finance domain experience. Reference these correctly:
 - **SR 11-7** — Federal Reserve / OCC guidance on model risk management; requires independent model validation, ongoing monitoring, documentation
 - **CECL** = Current Expected Credit Loss — FASB ASC 326; forward-looking loss reserve methodology replacing incurred-loss model
 - **Basel III/IV** — international capital adequacy standards; PD/LGD/EAD models are regulatory capital models subject to validation
-- **FINOS AIGF v2.0** — 46 AI risks mapped for financial services; the compliance engine should map to these risk IDs
+- **FINOS AIGF v2.0** — FINOS AI Governance Framework for financial services. The shipped bundle is 15 AgentGuard-local controls informed by it, with `AG-FINOS-NNN` IDs. Do **not** invent official FINOS `AIR-*` risk IDs; a real crosswalk to the FINOS risk registry requires domain review.
 - **EU AI Act** — credit scoring is explicitly High-Risk AI under Annex III, Article 6; requires conformity assessment, human oversight, accuracy and robustness metrics, bias audits
 
 ### Credit Risk Model Concepts
@@ -236,8 +235,8 @@ The owner has 17 years of finance domain experience. Reference these correctly:
 
 ### Formal Verification in Credit Risk
 - Regulatory models require **model documentation** proving properties like monotonicity (higher income → lower default probability)
-- Z3 solver can formally verify these constraints hold across the RBAC and agent policy space
-- Adverse action reason ordering must be deterministic and explainable — formal verification of decision tree properties is directly applicable
+- Z3 solver can formally verify these constraints hold across the RBAC and agent policy space (planned; not yet implemented — the shipped verifier covers RBAC reachability and policy consistency only)
+- Adverse action reason ordering must be deterministic and explainable — formal verification of decision tree properties is directly applicable (planned; not yet implemented — ordering is currently enforced by a sort tie-break)
 
 ---
 

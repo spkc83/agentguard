@@ -56,7 +56,7 @@ class PolicyResult(BaseModel):
     """Result of evaluating a single compliance policy rule.
 
     Args:
-        rule_id: Unique rule identifier (e.g. "OWASP-AGENT-01", "FINOS-AIGF-012").
+        rule_id: Unique rule identifier (e.g. "OWASP-AGENT-01", "AG-FINOS-012").
         rule_name: Human-readable rule name.
         passed: Whether the rule check passed.
         severity: Rule severity — critical, high, medium, or low.
