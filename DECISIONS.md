@@ -473,4 +473,27 @@ tracer starts emitting real spans automatically.
 - Negative: Policy files that previously loaded with a bad check type now break the engine — this is intended, but it is a breaking change for any downstream policy set carrying such a rule
 - Negative (stated limitation): CLI users cannot register custom check types. `extra_check_handlers` is a Python API only, so a YAML policy set using a custom type is loadable from library code but not from `agentguard policy validate`. Custom types remain a programmatic-integration feature; adding a plugin entry-point mechanism for the CLI is deferred until there is demand.
 
+## ADR-023 — RBAC resource is derived by the integrator, never supplied by the agent
+**Status:** Accepted
+**Date:** 2026-08-22
+
+**Context:** Every framework adapter accepted the RBAC `resource` as a free-form string at call time, defaulting to `"*"`. The resource is the *subject* of the permission decision, so the governed party was naming its own subject: with `allow tool:* on *` plus `deny tool:* on admin/*`, calling `admin_delete` with `resource="public/report"` — or with no resource at all — executed. The deny rule only fired when the caller volunteered an incriminating label. A second, related defect: `Permission.matches` used `fnmatch.fnmatch`, which applies `os.path.normcase`, so the same policy meant different things on Linux and Windows, and a case variant (`Admin/keys`) evaded `deny admin/*` on Linux.
+
+**Decision:**
+1. Adapters take resource **resolvers** at construction time and expose no resource argument at call time. `ResourceResolver = str | Callable[[Any], str | Awaitable[str]]` — a static string or a sync/async callable receiving the adapter-specific call input (LangGraph: `tool_input`; MCP: `arguments`; ADK: `args`; CrewAI: `{"args", "kwargs"}`). LangGraph and MCP take `resources: Mapping[tool_name, ResourceResolver]`, which doubles as an allowlist; CrewAI and ADK take a required `resource=`. A2A keeps deriving `agent/<target>`.
+2. `run_governed` accepts `resource: str | None`. `None` — no resolver, resolver raised, resolver returned a non-string, or canonicalisation rejected the value — is a fail-closed denial: a `denied` audit event is written against the sentinel `<unresolved>` and `PermissionDeniedError` is raised **before** RBAC is consulted.
+3. Every derived resource passes through `canonicalize_resource` before RBAC: reject empty, fnmatch metacharacters (`*?[]`), the sentinel characters `<>`, control characters, absolute paths and upward traversal; `posixpath.normpath`; `casefold()`.
+4. `Permission.matches` uses `fnmatch.fnmatchcase`. Resources are matched with both pattern and subject case-folded; actions are matched case-sensitively (actions are chosen by the integrator, and folding them would silently widen policy).
+5. Direct callers of `run_governed` (e.g. the credit-decisioning example) are inside the trust boundary by definition and own the derivation themselves; the docstring says so.
+
+**Consequences:**
+- Positive: the governed agent cannot choose its own RBAC subject; lying is a `TypeError` at the signature level, omission is an audited denial
+- Positive: an unknown tool name is now an audited denial instead of a `KeyError` — exactly the event an audit trail should record
+- Positive: policy semantics no longer depend on the host platform
+- Negative: breaking API change for all adapters (`resources=`/`resource=` are required keyword arguments; `ainvoke`/`call_tool`/`run_async` lost their `resource` parameter; CrewAI `_resource=` raises `TypeError`)
+- Negative: the honour system moves to whoever writes the resolver; the resolver author also writes the RBAC policy, which is the right trust level, but arg-dependent authorisation (e.g. "may this agent read *this* record") is properly an argument guardrail and is deferred to Phase 1.3/1.4 of `docs/plans/guardrails-realignment.md`
+- Deferred: a machine-stable reason-code field for denials (today `resource_unresolvable:` is a prefix in the free-text `PermissionContext.reason`) — PR 2.3
+
+---
+
 *When you (Claude Code) make a new architectural decision, append it here following the same format. Increment the ADR number sequentially.*

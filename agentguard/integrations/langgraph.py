@@ -4,6 +4,10 @@ Wraps LangGraph tool nodes so every tool call passes through AgentGuard's
 governance pipeline: identity -> RBAC -> circuit breaker -> audit -> execute
 (with error event logging on failure).
 
+The RBAC resource is derived from a per-tool resolver configured when the node
+is constructed — never from the agent's tool call. See
+:mod:`agentguard.integrations._pipeline` for why.
+
 Usage:
     from agentguard.integrations.langgraph import GovernedLangGraphToolNode
 
@@ -13,8 +17,9 @@ Usage:
         registry=registry,
         rbac_engine=engine,
         audit_log=audit,
+        resources={"credit_check": lambda args: f"bureau/{args['bureau']}"},
     )
-    result = await governed.ainvoke("tool_name", input_data)
+    result = await governed.ainvoke("credit_check", {"bureau": "experian"})
 """
 
 from __future__ import annotations
@@ -23,9 +28,11 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 import structlog
 
-from agentguard.integrations._pipeline import run_governed
+from agentguard.integrations._pipeline import ResourceResolver, resolve_resource, run_governed
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from agentguard.core.audit import AppendOnlyAuditLog
     from agentguard.core.circuit_breaker import CircuitBreaker
     from agentguard.core.identity import AgentRegistry
@@ -57,6 +64,11 @@ class GovernedLangGraphToolNode:
         registry: Agent identity registry.
         rbac_engine: RBAC permission checker.
         audit_log: Audit log for recording events.
+        resources: Per-tool RBAC resource resolvers, keyed by tool name. Each
+            value is a static resource string or a sync/async callable that
+            receives the tool input and returns the resource. A tool with no
+            entry here can never be called: its resource is unresolvable, so
+            the call is denied and audited.
         circuit_breaker: Optional circuit breaker for downstream protection.
         tracer: Optional :class:`AgentTracer` for OTel span emission.
     """
@@ -68,6 +80,8 @@ class GovernedLangGraphToolNode:
         registry: AgentRegistry,
         rbac_engine: RBACEngine,
         audit_log: AppendOnlyAuditLog,
+        *,
+        resources: Mapping[str, ResourceResolver],
         circuit_breaker: CircuitBreaker | None = None,
         tracer: AgentTracer | None = None,
     ) -> None:
@@ -76,32 +90,46 @@ class GovernedLangGraphToolNode:
         self._registry = registry
         self._rbac = rbac_engine
         self._audit = audit_log
+        self._resources: dict[str, ResourceResolver] = dict(resources)
         self._breaker = circuit_breaker
         self._tracer = tracer
 
-    async def ainvoke(self, tool_name: str, tool_input: Any, resource: str = "*") -> Any:
+    async def ainvoke(self, tool_name: str, tool_input: Any) -> Any:
         """Execute a governed tool call.
+
+        The RBAC resource comes from this node's configured resolver for
+        ``tool_name``; there is deliberately no way to pass one at call time.
+        An unregistered tool, or a tool with no resolver, is a fail-closed,
+        audited denial rather than a :class:`KeyError` — an unknown tool name
+        is exactly the kind of event an audit trail must record.
 
         Args:
             tool_name: Name of the tool to call.
-            tool_input: Input to pass to the tool.
-            resource: Resource pattern for RBAC check.
+            tool_input: Input to pass to the tool, and to the resolver.
 
         Returns:
             The tool result.
 
         Raises:
-            KeyError: If the tool is not registered.
-            PermissionDeniedError: If RBAC denies the action.
+            PermissionDeniedError: If the resource is unresolvable or RBAC
+                denies the action.
             Exception: Re-raised from the tool on execution failure (after
                 logging an ``error`` audit event).
         """
-        if tool_name not in self._tools:
-            raise KeyError(f"Tool not found: {tool_name}")
-
-        tool = self._tools[tool_name]
+        tool = self._tools.get(tool_name)
+        resource: str | None = None
+        if tool is None:
+            logger.warning(
+                "langgraph_tool_not_registered",
+                agent_id=self._agent_id,
+                tool_name=tool_name,
+            )
+        else:
+            resource = await resolve_resource(self._resources.get(tool_name), tool_input)
 
         async def _execute() -> Any:
+            if tool is None:  # pragma: no cover - denial always precedes execution
+                raise KeyError(f"Tool not found: {tool_name}")
             return await tool.ainvoke(tool_input)
 
         return await run_governed(

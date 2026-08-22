@@ -83,34 +83,44 @@ async def main() -> None:
         FakeTool("unreliable_api", None, fails=True),
     ]
 
+    # The RBAC resource for each tool is declared here, by the integrator, and
+    # derived from the call arguments where the resource is per-record. The
+    # agent never gets to name the resource its own permissions are checked
+    # against — that is the whole point of the resolver map.
     governed = GovernedLangGraphToolNode(
         tools=tools,
         agent_id=agent.agent_id,
         registry=registry,
         rbac_engine=engine,
         audit_log=audit_log,
+        resources={
+            "credit_check": "bureau/experian",
+            "score_model": "model/pd_v1",
+            "delete_customer": lambda args: f"customers/{args['id']}",
+            "unreliable_api": "bureau/unreliable",
+        },
         tracer=tracer,
     )
 
     # 1. Allowed call
-    result = await governed.ainvoke(
-        "credit_check", {"applicant_id": "A-001"}, resource="bureau/experian"
-    )
+    result = await governed.ainvoke("credit_check", {"applicant_id": "A-001"})
     print(f"1. credit_check result: {result}")  # noqa: T201
 
     # 2. Allowed call (model scoring)
-    result = await governed.ainvoke("score_model", {"features": [720, 0.3]}, resource="model/pd_v1")
+    result = await governed.ainvoke("score_model", {"features": [720, 0.3]})
     print(f"2. score_model result: {result}")  # noqa: T201
 
-    # 3. Denied call — RBAC deny-override
+    # 3. Denied call — RBAC deny-override. The resource is derived from the
+    #    call arguments as customers/a-001; the agent cannot substitute one
+    #    that its policy happens to allow.
     try:
-        await governed.ainvoke("delete_customer", {"id": "A-001"}, resource="customers/A-001")
+        await governed.ainvoke("delete_customer", {"id": "A-001"})
     except PermissionDeniedError as exc:
         print(f"3. delete_customer blocked: {exc}")  # noqa: T201
 
     # 4. Allowed call that fails downstream — error event is logged
     try:
-        await governed.ainvoke("unreliable_api", {"payload": 1}, resource="bureau/unreliable")
+        await governed.ainvoke("unreliable_api", {"payload": 1})
     except RuntimeError as exc:
         print(f"4. unreliable_api errored: {exc}")  # noqa: T201
 

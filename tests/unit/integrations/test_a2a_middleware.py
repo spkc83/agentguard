@@ -142,3 +142,61 @@ class TestGovernedA2AClient:
         )
         result = await client.send_message("agent-003", {"msg": "hi"})
         assert result == {"response": "acknowledged"}
+
+    async def test_case_variant_target_cannot_evade_deny(self, _a2a_setup: Any) -> None:
+        """``Secret-Ops`` must still hit ``deny a2a:send:* on agent/secret-*``.
+
+        The A2A resource is already derived (``agent/{target}``), but the target
+        name itself is caller-controlled, so canonicalisation is what stops a
+        cased variant from slipping past the deny rule.
+        """
+        registry, engine, audit, transport, audit_dir = _a2a_setup
+        agent = await registry.register(name="Bot", roles=["coordinator", "restricted"])
+
+        client = GovernedA2AClient(
+            transport=transport,
+            agent_id=agent.agent_id,
+            registry=registry,
+            rbac_engine=engine,
+            audit_log=audit,
+        )
+        with pytest.raises(PermissionDeniedError):
+            await client.send_message("Secret-Ops", {"task": "spy"})
+        transport.send.assert_not_called()
+
+        events = await FileAuditBackend(directory=audit_dir).read_all()
+        assert len(events) == 1
+        assert events[0].result == "denied"
+        assert events[0].resource == "agent/secret-ops"
+
+    async def test_empty_target_is_unresolvable(self, _a2a_setup: Any) -> None:
+        """An empty target must not resolve to a bare ``agent`` resource."""
+        registry, engine, audit, transport, _ = _a2a_setup
+        agent = await registry.register(name="Coordinator", roles=["coordinator"])
+
+        client = GovernedA2AClient(
+            transport=transport,
+            agent_id=agent.agent_id,
+            registry=registry,
+            rbac_engine=engine,
+            audit_log=audit,
+        )
+        with pytest.raises(PermissionDeniedError):
+            await client.send_message("", {"task": "x"})
+        transport.send.assert_not_called()
+
+    async def test_traversal_target_cannot_escape_agent_namespace(self, _a2a_setup: Any) -> None:
+        """``../admin`` as a target must not escape the ``agent/`` namespace."""
+        registry, engine, audit, transport, _ = _a2a_setup
+        agent = await registry.register(name="Coordinator", roles=["coordinator"])
+
+        client = GovernedA2AClient(
+            transport=transport,
+            agent_id=agent.agent_id,
+            registry=registry,
+            rbac_engine=engine,
+            audit_log=audit,
+        )
+        with pytest.raises(PermissionDeniedError):
+            await client.send_message("../admin", {"task": "x"})
+        transport.send.assert_not_called()

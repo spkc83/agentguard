@@ -4,6 +4,10 @@ Wraps CrewAI tools so every invocation passes through AgentGuard's
 governance pipeline: identity -> RBAC -> circuit breaker -> audit -> execute
 (with error event logging on failure).
 
+The RBAC resource is derived from a resolver configured when the wrapper is
+constructed — never from the agent's tool call. See
+:mod:`agentguard.integrations._pipeline` for why.
+
 Usage:
     from agentguard.integrations.crewai import GovernedCrewAITool
 
@@ -13,6 +17,7 @@ Usage:
         registry=registry,
         rbac_engine=engine,
         audit_log=audit,
+        resource="index/public",
     )
     result = await governed_tool.run("query")
 """
@@ -23,7 +28,7 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 import structlog
 
-from agentguard.integrations._pipeline import run_governed
+from agentguard.integrations._pipeline import ResourceResolver, resolve_resource, run_governed
 
 if TYPE_CHECKING:
     from agentguard.core.audit import AppendOnlyAuditLog
@@ -56,8 +61,11 @@ class GovernedCrewAITool:
         registry: Agent identity registry.
         rbac_engine: RBAC permission checker.
         audit_log: Audit log for recording events.
+        resource: Required RBAC resource resolver — a static resource string,
+            or a sync/async callable receiving ``{"args": args, "kwargs":
+            kwargs}`` and returning the resource. There is no default: a tool
+            whose resource cannot be stated is a tool that cannot be governed.
         circuit_breaker: Optional circuit breaker.
-        resource: Default resource pattern for RBAC checks.
         tracer: Optional :class:`AgentTracer` for OTel span emission.
     """
 
@@ -68,8 +76,9 @@ class GovernedCrewAITool:
         registry: AgentRegistry,
         rbac_engine: RBACEngine,
         audit_log: AppendOnlyAuditLog,
+        *,
+        resource: ResourceResolver,
         circuit_breaker: CircuitBreaker | None = None,
-        resource: str = "*",
         tracer: AgentTracer | None = None,
     ) -> None:
         self._tool = tool
@@ -77,8 +86,8 @@ class GovernedCrewAITool:
         self._registry = registry
         self._rbac = rbac_engine
         self._audit = audit_log
-        self._breaker = circuit_breaker
         self._resource = resource
+        self._breaker = circuit_breaker
         self._tracer = tracer
         self.name: str = tool.name
 
@@ -88,18 +97,22 @@ class GovernedCrewAITool:
         Args:
             *args: Positional arguments forwarded to the tool's ``_run``.
             **kwargs: Keyword arguments forwarded to the tool's ``_run``.
-                Pass ``_resource="..."`` to override the RBAC resource
-                for this call.
 
         Returns:
             The tool result.
 
         Raises:
-            PermissionDeniedError: If RBAC denies the action.
+            TypeError: If the removed ``_resource`` override is passed. It used
+                to let the caller name its own RBAC subject.
+            PermissionDeniedError: If the resource is unresolvable or RBAC
+                denies the action.
             Exception: Re-raised from the tool on execution failure (after
                 logging an ``error`` audit event).
         """
-        resource = kwargs.pop("_resource", self._resource)
+        if "_resource" in kwargs:
+            raise TypeError("_resource is no longer accepted; configure `resource=` on the adapter")
+
+        resource = await resolve_resource(self._resource, {"args": args, "kwargs": kwargs})
 
         async def _execute() -> Any:
             return self._tool._run(*args, **kwargs)

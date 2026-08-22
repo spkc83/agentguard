@@ -529,24 +529,48 @@ client = GovernedMcpClient(
     session=mcp_session,
     agent_id=agent.agent_id,
     registry=registry, rbac_engine=engine, audit_log=audit,
+    # RBAC resources are derived by the integrator at construction time —
+    # never accepted from the agent at call time (ADR-023). Tools without an
+    # entry here cannot be called: the resource is unresolvable, so the call
+    # is denied and audited.
+    resources={
+        "web_search": "web/search",
+        "read_record": lambda args: f"records/{args['record_id']}",
+    },
+)
 result = await client.call_tool("web_search", {"query": "..."})
 ```
 
+### Resource derivation (all adapters)
+
+`ResourceResolver = str | Callable[[Any], str | Awaitable[str]]`. Every derived
+resource is canonicalised before RBAC (`canonicalize_resource`: rejects
+`*?[]<>`, control characters, absolute paths and `..` traversal; normalises;
+case-folds) and an unresolvable resource is a fail-closed, audited denial
+against the sentinel `<unresolved>`. `Permission.matches` uses
+`fnmatch.fnmatchcase` — resources compare case-insensitively, actions
+case-sensitively. See ADR-023.
+
 ### LangGraph Integration (`GovernedLangGraphToolNode`)
 
-Drop-in replacement for LangGraph's `ToolNode`. Exposes `ainvoke(tool_name,
-input, resource)` and routes through the governance pipeline.
+Duck-typed wrapper (it does not yet subclass LangGraph's `ToolNode` — see
+Roadmap). Constructed with `resources: Mapping[tool_name, ResourceResolver]`
+(resolver input: `tool_input`); exposes `ainvoke(tool_name, tool_input)`. A
+tool with no resolver entry is denied and audited rather than raising
+`KeyError`.
 
 ### CrewAI Integration (`GovernedCrewAITool`)
 
 Wraps a CrewAI tool (sync `_run` method) so invocations go through the
-governance pipeline. The wrapper exposes an async `run(*args, **kwargs)`;
-callers can override the RBAC resource per-call via `_resource=...`.
+governance pipeline. Constructed with a required `resource: ResourceResolver`
+(resolver input: `{"args": args, "kwargs": kwargs}`); exposes an async
+`run(*args, **kwargs)`. Passing `_resource=` raises `TypeError`.
 
 ### Google ADK Integration (`GovernedAdkTool`)
 
-Wraps an ADK tool's `run_async(args, tool_context)` method. Resource
-pattern can be set per-instance or overridden per-call.
+Wraps an ADK tool's `run_async(args, tool_context)` method. Constructed with
+a required `resource: ResourceResolver` (resolver input: `args`); there is no
+per-call override.
 
 ### A2A Middleware (`GovernedA2AClient`)
 

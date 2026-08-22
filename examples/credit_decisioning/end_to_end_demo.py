@@ -135,6 +135,8 @@ async def main() -> None:
                 application=_app,
             )
 
+        # Direct run_governed callers are inside the trust boundary: this code
+        # derives the resource itself. It must never be taken from agent input.
         decision = await run_governed(
             agent_id=agent.agent_id,
             action="tool:score_application",

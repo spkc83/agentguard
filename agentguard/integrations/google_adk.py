@@ -4,6 +4,10 @@ Wraps Google Agent Development Kit (ADK) tool calls so every invocation
 passes through AgentGuard's governance pipeline (with error event logging
 on failure).
 
+The RBAC resource is derived from a resolver configured when the wrapper is
+constructed — never from the agent's tool call. See
+:mod:`agentguard.integrations._pipeline` for why.
+
 Usage:
     from agentguard.integrations.google_adk import GovernedAdkTool
 
@@ -13,8 +17,9 @@ Usage:
         registry=registry,
         rbac_engine=engine,
         audit_log=audit,
+        resource=lambda args: f"customers/{args['id']}",
     )
-    result = await governed.run_async(args={"key": "value"})
+    result = await governed.run_async(args={"id": "A-001"})
 """
 
 from __future__ import annotations
@@ -23,7 +28,7 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 import structlog
 
-from agentguard.integrations._pipeline import run_governed
+from agentguard.integrations._pipeline import ResourceResolver, resolve_resource, run_governed
 
 if TYPE_CHECKING:
     from agentguard.core.audit import AppendOnlyAuditLog
@@ -56,8 +61,11 @@ class GovernedAdkTool:
         registry: Agent identity registry.
         rbac_engine: RBAC permission checker.
         audit_log: Audit log for recording events.
+        resource: Required RBAC resource resolver — a static resource string,
+            or a sync/async callable receiving the ``args`` dict and returning
+            the resource. There is no default: a tool whose resource cannot be
+            stated is a tool that cannot be governed.
         circuit_breaker: Optional circuit breaker.
-        resource: Default resource pattern for RBAC checks.
         tracer: Optional :class:`AgentTracer` for OTel span emission.
     """
 
@@ -68,8 +76,9 @@ class GovernedAdkTool:
         registry: AgentRegistry,
         rbac_engine: RBACEngine,
         audit_log: AppendOnlyAuditLog,
+        *,
+        resource: ResourceResolver,
         circuit_breaker: CircuitBreaker | None = None,
-        resource: str = "*",
         tracer: AgentTracer | None = None,
     ) -> None:
         self._tool = tool
@@ -77,8 +86,8 @@ class GovernedAdkTool:
         self._registry = registry
         self._rbac = rbac_engine
         self._audit = audit_log
-        self._breaker = circuit_breaker
         self._resource = resource
+        self._breaker = circuit_breaker
         self._tracer = tracer
         self.name: str = tool.name
 
@@ -87,24 +96,26 @@ class GovernedAdkTool:
         *,
         args: dict[str, Any],
         tool_context: Any = None,
-        resource: str | None = None,
     ) -> Any:
         """Execute the governed ADK tool call.
 
+        The RBAC resource comes from this wrapper's configured resolver; there
+        is deliberately no per-call override.
+
         Args:
-            args: Tool arguments dict.
+            args: Tool arguments dict. Also handed to the resolver.
             tool_context: ADK tool context (passed through to underlying tool).
-            resource: Override resource pattern for RBAC check.
 
         Returns:
             The tool result.
 
         Raises:
-            PermissionDeniedError: If RBAC denies the action.
+            PermissionDeniedError: If the resource is unresolvable or RBAC
+                denies the action.
             Exception: Re-raised from the tool on execution failure (after
                 logging an ``error`` audit event).
         """
-        effective_resource = resource or self._resource
+        resource = await resolve_resource(self._resource, args)
 
         async def _execute() -> Any:
             return await self._tool.run_async(args=args, tool_context=tool_context)
@@ -112,7 +123,7 @@ class GovernedAdkTool:
         return await run_governed(
             agent_id=self._agent_id,
             action=f"tool:{self.name}",
-            resource=effective_resource,
+            resource=resource,
             registry=self._registry,
             rbac_engine=self._rbac,
             audit_log=self._audit,

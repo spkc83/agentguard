@@ -89,11 +89,17 @@ class GovernedA2AClient:
             target_agent: The target agent's ID or name.
             message: The message payload.
 
+        The RBAC resource is derived here as ``agent/{target_agent}`` — it is
+        never supplied by the caller as a free-form value — and is then
+        canonicalised by the pipeline, so a cased or traversing target name
+        cannot slip past a deny rule.
+
         Returns:
             The response from the target agent.
 
         Raises:
-            PermissionDeniedError: If RBAC denies the communication.
+            PermissionDeniedError: If the target name does not canonicalise to
+                a usable resource, or RBAC denies the communication.
             Exception: Re-raised from the transport on send failure (after
                 logging an ``error`` audit event).
         """

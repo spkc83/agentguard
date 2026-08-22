@@ -250,3 +250,59 @@ class TestRBACEngine:
         ctx_b = await engine.check_permission(_identity(["role-a"]), "tool:b", "anywhere")
         assert ctx_a.granted is True
         assert ctx_b.granted is True
+
+
+class TestPermissionMatchingCaseSemantics:
+    """Resource matching is case-insensitive; action matching is exact-case.
+
+    A resource reaching RBAC is derived from tool arguments, so an attacker who
+    controls the casing must not be able to slip past a deny rule. Actions are
+    chosen by the integrator, so they stay exact to avoid silently widening a
+    policy.
+    """
+
+    def test_resource_case_variant_still_matches_deny_pattern(self) -> None:
+        perm = Permission(action="tool:*", resource="admin/*", effect="deny")
+        assert perm.matches("tool:delete", "Admin/keys") is True
+        assert perm.matches("tool:delete", "ADMIN/KEYS") is True
+
+    def test_uppercase_pattern_matches_lowercase_resource(self) -> None:
+        """A policy author writing ``Admin/*`` still governs ``admin/keys``."""
+        perm = Permission(action="tool:*", resource="Admin/*", effect="deny")
+        assert perm.matches("tool:delete", "admin/keys") is True
+
+    def test_action_matching_is_case_sensitive(self) -> None:
+        perm = Permission(action="tool:admin_delete", resource="*", effect="allow")
+        assert perm.matches("tool:admin_delete", "x") is True
+        assert perm.matches("tool:Admin_Delete", "x") is False
+        assert perm.matches("TOOL:ADMIN_DELETE", "x") is False
+
+    async def test_engine_denies_case_variant_resource(self) -> None:
+        engine = RBACEngine(
+            roles=[
+                Role(
+                    name="analyst",
+                    permissions=[
+                        Permission(action="tool:*", resource="*", effect="allow"),
+                        Permission(action="tool:*", resource="admin/*", effect="deny"),
+                    ],
+                )
+            ]
+        )
+        ctx = await engine.check_permission(_identity(["analyst"]), "tool:delete", "Admin/keys")
+        assert ctx.granted is False
+        assert "Explicit deny" in ctx.reason
+
+    async def test_engine_action_case_variant_does_not_match(self) -> None:
+        engine = RBACEngine(
+            roles=[
+                Role(
+                    name="analyst",
+                    permissions=[
+                        Permission(action="tool:admin_delete", resource="*", effect="allow"),
+                    ],
+                )
+            ]
+        )
+        ctx = await engine.check_permission(_identity(["analyst"]), "tool:Admin_Delete", "anything")
+        assert ctx.granted is False
