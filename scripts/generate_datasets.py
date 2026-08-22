@@ -5,6 +5,10 @@ regenerated deterministically from `SyntheticCreditGenerator` so that
 checked-in binaries and real PII never collide. This script writes JSONL (and
 parquet when `pyarrow` is installed) into `datasets/` with reproducible seeds.
 
+Determinism guarantee: for a given `--seed` and `--size`, output bytes are
+identical across runs, machines, and `PYTHONHASHSEED` values — the per-dataset
+seed offset is derived with `zlib.crc32`, not the salted builtin `hash`.
+
 Usage:
     python scripts/generate_datasets.py                  # defaults: all sets
     python scripts/generate_datasets.py --size 50000 --seed 1
@@ -16,6 +20,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import zlib
 from pathlib import Path
 from typing import Any
 
@@ -57,6 +62,16 @@ def _try_write_parquet(records: list[dict[str, Any]], path: Path) -> bool:
         return True
     except (ImportError, ValueError):
         return False
+
+
+def _dataset_seed(base_seed: int, name: str) -> int:
+    """Derive a stable per-dataset seed offset.
+
+    ``zlib.crc32`` is used instead of the builtin ``hash`` because ``hash`` on
+    ``str`` is salted by ``PYTHONHASHSEED`` and therefore varies between
+    interpreter processes, which would break regeneration determinism.
+    """
+    return base_seed + zlib.crc32(name.encode()) % 1000
 
 
 def _generate_one(name: str, size: int, seed: int, root: Path) -> Path:
@@ -105,7 +120,7 @@ def main() -> int:
 
     names = list(DATASETS) if args.dataset == "all" else [args.dataset]
     for name in names:
-        path = _generate_one(name, args.size, args.seed + hash(name) % 1000, args.out)
+        path = _generate_one(name, args.size, _dataset_seed(args.seed, name), args.out)
         print(f"Wrote {name} -> {path}")  # noqa: T201
     return 0
 

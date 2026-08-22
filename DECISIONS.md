@@ -450,4 +450,27 @@ tracer starts emitting real spans automatically.
   review (ADR-018 promised NoOp fallback behavior but the first cut
   took a more intrusive path)
 
+---
+
+## ADR-022 — Unknown policy check types fail at load time
+**Status:** Accepted
+**Date:** 2026-08-22
+
+**Supersedes:** the "New check types can be added by registering a handler in the `_check_handlers` dispatch table" mechanism and the "Unknown check types pass safely" consequence in ADR-015 (ADR-015 otherwise stands: YAML policy-as-code with typed check handlers).
+
+**Context:** `PolicyEngine._evaluate_rule` resolved `check.type` against a dispatch table and, on a miss, returned `PolicyResult(passed=True, evidence={"note": "Unknown check type: ..."})`. A single typo in a YAML file — `action_blocklsit` instead of `action_blocklist` — therefore turned a critical control into a rule that always passes, at runtime, with no error and only a note buried in the evidence dict. This directly contradicts design principle 5 (fail-safe over fail-open) and is exactly the failure mode a compliance engine exists to prevent: the policy set looks complete in `agentguard policy validate` while the control is inert. Additionally, the dispatch table was a class-level dict of *unbound* methods invoked as `handler(self, rule, event)`, so third-party handlers had to accept an engine instance as their first argument — an awkward, undocumented contract.
+
+**Decision:**
+1. Unknown check types are rejected at **load time**. `PolicyEngine._load_file` validates every rule's `check.type` against the handler table immediately after the `PolicyRule` is constructed, and raises `PolicyLoadError(file, rule_id, detail)` (new, in `agentguard/exceptions.py`) listing the known types. Construction of the engine fails; the process does not start with a silently degraded policy set.
+2. Custom check types are registered through the constructor: `PolicyEngine(policy_dirs=..., extra_check_handlers={"my_check": handler})`, where `CheckHandler = Callable[[PolicyRule, AuditEvent], PolicyResult]`. The merged table is built in `__init__` *before* any policy file is read, so custom types load exactly like built-in ones. Built-in handlers are bound methods, so they share the `(rule, event)` signature — no engine argument leaks into the public contract.
+3. The runtime "unknown check type" branch in `_evaluate_rule` remains only as a defensive `# pragma: no cover` guard that raises rather than passes, for the case where a rule is injected after construction.
+4. The CLI (`policy validate`, `policy report`, `verify policy`) catches `PolicyLoadError`, prints the file, rule ID, and offending type, and exits 1.
+
+**Consequences:**
+- Positive: A misspelled or unimplemented check type is caught at startup and in CI, not discovered during an audit
+- Positive: Custom handlers have a documented, engine-free signature and cannot be shadowed by a load-order accident
+- Positive: `agentguard policy validate` becomes a real gate — it now fails on a policy set the engine could not fully evaluate
+- Negative: Policy files that previously loaded with a bad check type now break the engine — this is intended, but it is a breaking change for any downstream policy set carrying such a rule
+- Negative (stated limitation): CLI users cannot register custom check types. `extra_check_handlers` is a Python API only, so a YAML policy set using a custom type is loadable from library code but not from `agentguard policy validate`. Custom types remain a programmatic-integration feature; adding a plugin entry-point mechanism for the CLI is deferred until there is demand.
+
 *When you (Claude Code) make a new architectural decision, append it here following the same format. Increment the ADR number sequentially.*

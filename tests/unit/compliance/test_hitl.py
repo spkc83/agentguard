@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import time
+from datetime import UTC, datetime
+
 import pytest
 
 from agentguard.compliance.hitl import (
@@ -86,3 +89,27 @@ class TestApprovalDecision:
         decision = ApprovalDecision(approved=True, approver_id="test")
         with pytest.raises(Exception):
             decision.approved = False  # type: ignore[misc]
+
+
+class TestTimestampDefaults:
+    def test_escalation_timestamp_is_per_instance(self) -> None:
+        """HitlEscalation.timestamp must not be frozen at class-definition time."""
+        first = _make_escalation()
+        time.sleep(0.01)
+        second = _make_escalation()
+        assert first.timestamp != second.timestamp
+
+    def test_escalation_timestamp_defaults_to_now(self) -> None:
+        escalation = _make_escalation()
+        assert abs((datetime.now(UTC) - escalation.timestamp).total_seconds()) < 1.0
+
+    def test_decision_timestamp_is_per_instance(self) -> None:
+        """ApprovalDecision.timestamp must not be frozen at class-definition time."""
+        first = ApprovalDecision(approved=True, approver_id="human-1")
+        time.sleep(0.01)
+        second = ApprovalDecision(approved=True, approver_id="human-1")
+        assert first.timestamp != second.timestamp
+
+    def test_decision_timestamp_defaults_to_now(self) -> None:
+        decision = ApprovalDecision(approved=False, approver_id="human-1")
+        assert abs((datetime.now(UTC) - decision.timestamp).total_seconds()) < 1.0

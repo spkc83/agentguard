@@ -8,7 +8,8 @@ from pathlib import Path
 import pytest
 
 from agentguard.compliance.engine import PolicyEngine, PolicyRule, PolicySet
-from agentguard.models import AgentIdentity, AuditEvent, PermissionContext
+from agentguard.exceptions import PolicyLoadError
+from agentguard.models import AgentIdentity, AuditEvent, PermissionContext, PolicyResult
 
 
 def _make_event(
@@ -246,7 +247,8 @@ rules:
         results = await engine.evaluate(event)
         assert results[0].passed is False
 
-    async def test_unknown_check_type_passes(self, tmp_path: Path) -> None:
+    def test_unknown_check_type_fails_to_load(self, tmp_path: Path) -> None:
+        """Fail-safe: a typo'd check type must block at load, never silently pass."""
         policy_file = tmp_path / "test.yaml"
         policy_file.write_text(
             """
@@ -262,10 +264,76 @@ rules:
     remediation: N/A
 """
         )
-        engine = PolicyEngine(policy_dirs=[tmp_path])
-        event = _make_event()
-        results = await engine.evaluate(event)
-        assert results[0].passed is True
+        with pytest.raises(PolicyLoadError) as exc_info:
+            PolicyEngine(policy_dirs=[tmp_path])
+        message = str(exc_info.value)
+        assert "TEST-07" in message
+        assert "nonexistent_check" in message
+        assert "unknown check type" in message
+
+    def test_missing_check_type_fails_to_load(self, tmp_path: Path) -> None:
+        """A rule with no check.type at all is also a load-time failure."""
+        policy_file = tmp_path / "test.yaml"
+        policy_file.write_text(
+            """
+name: "Test"
+version: "1.0"
+rules:
+  - id: TEST-07B
+    name: No check type
+    severity: low
+    description: test
+    check: {}
+    remediation: N/A
+"""
+        )
+        with pytest.raises(PolicyLoadError):
+            PolicyEngine(policy_dirs=[tmp_path])
+
+    async def test_extra_check_handler_loads_and_evaluates(self, tmp_path: Path) -> None:
+        """A custom check type registered via extra_check_handlers loads and runs."""
+        policy_file = tmp_path / "test.yaml"
+        policy_file.write_text(
+            """
+name: "Test"
+version: "1.0"
+rules:
+  - id: TEST-CUSTOM
+    name: Custom check
+    severity: critical
+    description: test
+    check:
+      type: my_custom_check
+    remediation: Implement the control.
+"""
+        )
+
+        def _always_fails(rule: PolicyRule, event: AuditEvent) -> PolicyResult:
+            return PolicyResult(
+                rule_id=rule.id,
+                rule_name=rule.name,
+                passed=False,
+                severity=rule.severity,
+                evidence={"custom": event.action},
+                remediation=rule.remediation,
+            )
+
+        engine = PolicyEngine(
+            policy_dirs=[tmp_path],
+            extra_check_handlers={"my_custom_check": _always_fails},
+        )
+        assert len(engine.all_rules) == 1
+
+        results = await engine.evaluate(_make_event(action="tool:custom"))
+        assert len(results) == 1
+        assert results[0].rule_id == "TEST-CUSTOM"
+        assert results[0].passed is False
+        assert results[0].evidence == {"custom": "tool:custom"}
+
+    def test_builtin_policies_still_load(self) -> None:
+        """The shipped policy set must remain loadable under the strict check."""
+        engine = PolicyEngine()
+        assert len(engine.all_rules) == 35
 
     async def test_disabled_rules_excluded(self, tmp_path: Path) -> None:
         policy_file = tmp_path / "test.yaml"

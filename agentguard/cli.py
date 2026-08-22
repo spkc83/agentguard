@@ -176,9 +176,14 @@ def policy_validate(
 ) -> None:
     """Validate and list all loaded policy rules."""
     from agentguard.compliance.engine import PolicyEngine
+    from agentguard.exceptions import PolicyLoadError
 
     dirs = [policy_dir] if policy_dir else None
-    engine = PolicyEngine(policy_dirs=dirs)
+    try:
+        engine = PolicyEngine(policy_dirs=dirs)
+    except PolicyLoadError as e:
+        console.print(f"[red]Policy load failed:[/red] {e}")
+        raise typer.Exit(code=1) from None
 
     table = Table(title="Loaded Policy Rules")
     table.add_column("Rule ID", style="bold")
@@ -219,6 +224,7 @@ def policy_report(
     from agentguard.compliance.engine import PolicyEngine
     from agentguard.compliance.reporter import ComplianceReporter
     from agentguard.core.audit import FileAuditBackend
+    from agentguard.exceptions import PolicyLoadError
 
     async def _report() -> None:
         backend = FileAuditBackend(directory=log_dir)
@@ -229,7 +235,11 @@ def policy_report(
             return
 
         dirs = [policy_dir] if policy_dir else None
-        engine = PolicyEngine(policy_dirs=dirs)
+        try:
+            engine = PolicyEngine(policy_dirs=dirs)
+        except PolicyLoadError as e:
+            console.print(f"[red]Policy load failed:[/red] {e}")
+            raise typer.Exit(code=1) from None
         reporter = ComplianceReporter(engine)
         report = await reporter.generate_report(events)
 
@@ -262,7 +272,6 @@ def verify_rbac(
           resource: admin/users
         forbidden_roles: [analyst]
     """
-    from agentguard.compliance.formal_verifier import FormalVerifier
     from agentguard.core.rbac import Permission, Role
 
     if config is None:
@@ -311,12 +320,18 @@ def verify_rbac(
 
     forbidden_roles = data.get("forbidden_roles", [])
 
-    verifier = FormalVerifier()
-    result = verifier.verify_rbac_escalation(
-        roles=roles,
-        target_permission_index=target_index,
-        forbidden_roles=forbidden_roles,
-    )
+    try:
+        from agentguard.compliance.formal_verifier import FormalVerifier
+
+        verifier = FormalVerifier()
+        result = verifier.verify_rbac_escalation(
+            roles=roles,
+            target_permission_index=target_index,
+            forbidden_roles=forbidden_roles,
+        )
+    except ImportError as e:
+        console.print(f"[red]{e}[/red]\nInstall with: pip install 'agentguard\\[verify]'")
+        raise typer.Exit(code=1) from None
 
     if result.status == "unsat":
         console.print(
@@ -342,11 +357,14 @@ def verify_policy(
 ) -> None:
     """Check policy set for contradictions and dead rules."""
     from agentguard.compliance.engine import PolicyEngine
-    from agentguard.compliance.formal_verifier import FormalVerifier
+    from agentguard.exceptions import PolicyLoadError
 
     dirs = [policy_dir] if policy_dir else None
-    engine = PolicyEngine(policy_dirs=dirs)
-    verifier = FormalVerifier()
+    try:
+        engine = PolicyEngine(policy_dirs=dirs)
+    except PolicyLoadError as e:
+        console.print(f"[red]Policy load failed:[/red] {e}")
+        raise typer.Exit(code=1) from None
 
     # Build simplified rule representations for Z3
     rules = []
@@ -365,7 +383,14 @@ def verify_policy(
         console.print("[yellow]No policy rules found to verify.[/yellow]")
         return
 
-    result = verifier.verify_policy_consistency(rules)
+    try:
+        from agentguard.compliance.formal_verifier import FormalVerifier
+
+        result = FormalVerifier().verify_policy_consistency(rules)
+    except ImportError as e:
+        console.print(f"[red]{e}[/red]\nInstall with: pip install 'agentguard\\[verify]'")
+        raise typer.Exit(code=1) from None
+
     if result.status == "unsat":
         console.print(
             f"[green]Policy consistency verified. "
@@ -474,3 +499,7 @@ def observe_summary(
             console.print(f"  {k}: {v}")
 
     asyncio.run(_summary())
+
+
+if __name__ == "__main__":  # pragma: no cover
+    app()

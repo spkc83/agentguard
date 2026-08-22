@@ -2,10 +2,26 @@
 
 from __future__ import annotations
 
+import time
+from datetime import UTC, datetime
+
+import pytest
+from pydantic import ValidationError
+
 from agentguard.domains.finance.credit_risk.adverse_action import (
     AdverseActionGenerator,
     AdverseActionNotice,
 )
+
+
+def _make_notice() -> AdverseActionNotice:
+    return AdverseActionNotice(
+        notice_id="AA-001",
+        applicant_id="APP-001",
+        decision="denied",
+        reasons=("Test reason",),
+        reason_codes={"test": "Test reason"},
+    )
 
 
 class TestAdverseActionGenerator:
@@ -88,11 +104,31 @@ class TestAdverseActionGenerator:
 
 class TestAdverseActionNotice:
     def test_notice_is_frozen(self) -> None:
-        notice = AdverseActionNotice(
-            notice_id="AA-001",
-            applicant_id="APP-001",
-            decision="denied",
-            reasons=["Test reason"],
-            reason_codes={"test": "Test reason"},
-        )
+        """Frozen must be deep enough: scalars AND the reasons sequence."""
+        notice = _make_notice()
         assert notice.decision == "denied"
+
+        with pytest.raises(ValidationError):
+            notice.decision = "approved"  # type: ignore[misc]
+
+        # reasons is a tuple -> no in-place mutation of a frozen notice
+        assert isinstance(notice.reasons, tuple)
+        with pytest.raises(AttributeError):
+            notice.reasons.append("injected")  # type: ignore[attr-defined]
+        assert notice.reasons == ("Test reason",)
+
+    def test_generated_reasons_are_a_tuple(self) -> None:
+        gen = AdverseActionGenerator()
+        notice = gen.generate("AA-001", "APP-001", {"fico_score": 0.5})
+        assert isinstance(notice.reasons, tuple)
+
+    def test_decision_date_is_per_instance_not_frozen_at_import(self) -> None:
+        """decision_date must be evaluated per instance, not at class definition."""
+        first = _make_notice()
+        time.sleep(0.01)
+        second = _make_notice()
+        assert first.decision_date != second.decision_date
+
+    def test_decision_date_defaults_to_now(self) -> None:
+        notice = _make_notice()
+        assert abs((datetime.now(UTC) - notice.decision_date).total_seconds()) < 1.0

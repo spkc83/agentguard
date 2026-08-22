@@ -81,7 +81,8 @@ class TestSyntheticCreditGenerator:
 
         high_fico = [r for r in records if r["fico_score"] >= 720]
         low_fico = [r for r in records if r["fico_score"] < 640]
-        assert high_fico and low_fico, "need samples in both FICO bands"
+        assert high_fico, "need samples in the high FICO band"
+        assert low_fico, "need samples in the low FICO band"
 
         high_rate = sum(r["is_default"] for r in high_fico) / len(high_fico)
         low_rate = sum(r["is_default"] for r in low_fico) / len(low_fico)

@@ -17,7 +17,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 import structlog
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 logger = structlog.get_logger()
 
@@ -46,7 +46,7 @@ class AdverseActionNotice(BaseModel):
         notice_id: Unique notice identifier.
         applicant_id: The applicant this notice is for.
         decision: The credit decision (denied, counteroffer, etc.).
-        reasons: Ordered list of adverse action reasons (most impactful first).
+        reasons: Ordered, immutable reasons (most impactful first).
         reason_codes: Feature names mapped to their reason strings.
         creditor_name: Name of the creditor issuing the notice.
         decision_date: When the decision was made.
@@ -59,10 +59,10 @@ class AdverseActionNotice(BaseModel):
     notice_id: str
     applicant_id: str
     decision: str
-    reasons: list[str]
+    reasons: tuple[str, ...]
     reason_codes: dict[str, str]
     creditor_name: str = ""
-    decision_date: datetime = datetime.now(UTC)
+    decision_date: datetime = Field(default_factory=lambda: datetime.now(UTC))
     pd_score: float = 0.0
     disclosure_text: str = (
         "This notice is provided to you in accordance with the Equal Credit "
@@ -139,7 +139,7 @@ class AdverseActionGenerator:
             notice_id=notice_id,
             applicant_id=applicant_id,
             decision=decision,
-            reasons=reasons,
+            reasons=tuple(reasons),
             reason_codes=reason_codes,
             creditor_name=creditor_name,
             pd_score=pd_score,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from agentguard.exceptions import (
+    AgentGuardError,
     AuditError,
     AuditKeyMissingError,
     AuditTamperDetectedError,
@@ -10,6 +11,7 @@ from agentguard.exceptions import (
     DuplicateAgentError,
     IdentityNotFoundError,
     PermissionDeniedError,
+    PolicyLoadError,
     PolicyViolationError,
     SandboxError,
 )
@@ -40,6 +42,25 @@ class TestPolicyViolationError:
     def test_with_remediation(self) -> None:
         err = PolicyViolationError("R1", "Rule", remediation="Fix it")
         assert err.remediation == "Fix it"
+
+
+class TestPolicyLoadError:
+    def test_basic(self) -> None:
+        err = PolicyLoadError(
+            file="policies/custom.yaml",
+            rule_id="CUSTOM-01",
+            detail="unknown check type 'action_blocklsit'",
+        )
+        assert err.file == "policies/custom.yaml"
+        assert err.rule_id == "CUSTOM-01"
+        assert err.detail == "unknown check type 'action_blocklsit'"
+        assert "policies/custom.yaml" in str(err)
+        assert "CUSTOM-01" in str(err)
+        assert "unknown check type" in str(err)
+
+    def test_is_agentguard_error(self) -> None:
+        err = PolicyLoadError(file="f.yaml", rule_id="R1", detail="bad")
+        assert isinstance(err, AgentGuardError)
 
 
 class TestAuditErrors:

@@ -35,6 +35,21 @@ class PolicyViolationError(AgentGuardError):
         super().__init__(f"Policy violation: {rule_id} ({rule_name})")
 
 
+class PolicyLoadError(AgentGuardError):
+    """Raised when a policy file cannot be loaded safely.
+
+    Fail-safe over fail-open: a rule the engine cannot evaluate (for example
+    an unknown or misspelled ``check.type``) must stop startup rather than
+    silently degrade into a rule that always passes.
+    """
+
+    def __init__(self, file: str, rule_id: str, detail: str) -> None:
+        self.file = file
+        self.rule_id = rule_id
+        self.detail = detail
+        super().__init__(f"Policy file {file}: rule {rule_id}: {detail}")
+
+
 class AuditError(AgentGuardError):
     """Raised when the audit log cannot be written. Blocks action execution."""
 

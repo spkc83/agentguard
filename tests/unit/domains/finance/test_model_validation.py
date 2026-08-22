@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import time
+from datetime import UTC, datetime
+
 from agentguard.domains.finance.credit_risk.model_validation import (
+    ModelValidationReport,
     ModelValidator,
     PerformanceMetrics,
 )
@@ -94,3 +98,23 @@ class TestPerformanceMetrics:
         metrics = PerformanceMetrics()
         assert metrics.gini == 0.0
         assert metrics.psi == 0.0
+
+
+class TestModelValidationReportTimestamp:
+    def _make(self) -> ModelValidationReport:
+        return ModelValidationReport(
+            report_id="VAL-001",
+            model_name="PD Scorecard",
+            model_version="1.0",
+        )
+
+    def test_validation_date_is_per_instance_not_frozen_at_import(self) -> None:
+        """validation_date must be evaluated per instance, not at class definition."""
+        first = self._make()
+        time.sleep(0.01)
+        second = self._make()
+        assert first.validation_date != second.validation_date
+
+    def test_validation_date_defaults_to_now(self) -> None:
+        report = self._make()
+        assert abs((datetime.now(UTC) - report.validation_date).total_seconds()) < 1.0

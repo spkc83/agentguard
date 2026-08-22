@@ -19,7 +19,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 import structlog
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 logger = structlog.get_logger()
 
@@ -85,7 +85,7 @@ class ModelValidationReport(BaseModel):
     report_id: str
     model_name: str
     model_version: str
-    validation_date: datetime = datetime.now(UTC)
+    validation_date: datetime = Field(default_factory=lambda: datetime.now(UTC))
     validator_id: str = ""
     performance: PerformanceMetrics = PerformanceMetrics()
     findings: list[ValidationFinding] = []

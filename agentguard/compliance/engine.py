@@ -11,16 +11,21 @@ documented in ARCHITECTURE.md.
 from __future__ import annotations
 
 import re
+from collections.abc import Callable, Mapping
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Any, Literal
 
 import structlog
 import yaml
 from pydantic import BaseModel, ConfigDict
 
+from agentguard.exceptions import PolicyLoadError
 from agentguard.models import AuditEvent, PolicyResult
 
 Severity = Literal["critical", "high", "medium", "low"]
+
+#: Signature every policy check handler must implement.
+CheckHandler = Callable[["PolicyRule", AuditEvent], PolicyResult]
 
 logger = structlog.get_logger()
 
@@ -85,13 +90,41 @@ class PolicyEngine:
     - rate_check: Flag high-frequency actions.
     - metadata_required: Require specific metadata fields on the agent.
 
+    Unknown check types are rejected at load time (ADR-022): a misspelled
+    ``check.type`` would otherwise silently turn a control into a rule that
+    always passes, which violates the fail-safe-over-fail-open principle.
+
     Args:
         policy_dirs: Directories to load policy YAML files from.
             Defaults to the built-in policies directory.
+        extra_check_handlers: Additional check types, mapping a
+            ``check.type`` string to a callable taking ``(rule, event)``
+            and returning a PolicyResult. Registered before any policy
+            file is read, so custom types load like built-in ones.
+
+    Raises:
+        PolicyLoadError: If a rule declares a check type with no handler.
     """
 
-    def __init__(self, policy_dirs: list[Path] | None = None) -> None:
+    def __init__(
+        self,
+        policy_dirs: list[Path] | None = None,
+        extra_check_handlers: Mapping[str, CheckHandler] | None = None,
+    ) -> None:
         self._policy_sets: list[PolicySet] = []
+        # Built-in handlers are bound here so they share the (rule, event)
+        # signature that custom handlers use.
+        self._check_handlers: dict[str, CheckHandler] = {
+            "action_blocklist": self._check_action_blocklist,
+            "resource_pattern": self._check_resource_pattern,
+            "content_scan": self._check_content_scan,
+            "permission_required": self._check_permission_required,
+            "result_required": self._check_result_required,
+            "metadata_required": self._check_metadata_required,
+        }
+        if extra_check_handlers:
+            self._check_handlers.update(extra_check_handlers)
+
         dirs = policy_dirs or [_DEFAULT_POLICIES_DIR]
         for d in dirs:
             self._load_directory(d)
@@ -100,6 +133,11 @@ class PolicyEngine:
             policy_sets=len(self._policy_sets),
             total_rules=sum(len(ps.rules) for ps in self._policy_sets),
         )
+
+    @property
+    def check_types(self) -> list[str]:
+        """Return the check types this engine can evaluate, sorted."""
+        return sorted(self._check_handlers)
 
     def _load_directory(self, directory: Path) -> None:
         """Load all YAML policy files from a directory."""
@@ -119,7 +157,15 @@ class PolicyEngine:
 
         rules = []
         for rule_data in data.get("rules", []):
-            rules.append(PolicyRule(**rule_data))
+            rule = PolicyRule(**rule_data)
+            check_type = rule.check.get("type")
+            if check_type not in self._check_handlers:
+                raise PolicyLoadError(
+                    file=str(path),
+                    rule_id=rule.id,
+                    detail=(f"unknown check type {check_type!r}; known: {self.check_types}"),
+                )
+            rules.append(rule)
 
         ps = PolicySet(
             name=data.get("name", path.stem),
@@ -161,21 +207,24 @@ class PolicyEngine:
         return results
 
     def _evaluate_rule(self, rule: PolicyRule, event: AuditEvent) -> PolicyResult:
-        """Evaluate a single rule against an event."""
+        """Evaluate a single rule against an event.
+
+        Raises:
+            PolicyLoadError: Defensive guard — unknown check types are
+                rejected at load time, so reaching this branch means a rule
+                was injected after construction.
+        """
         check_type = rule.check.get("type", "")
         handler = self._check_handlers.get(check_type)
 
-        if handler is None:
-            return PolicyResult(
+        if handler is None:  # pragma: no cover - blocked at load time
+            raise PolicyLoadError(
+                file="<runtime>",
                 rule_id=rule.id,
-                rule_name=rule.name,
-                passed=True,
-                severity=rule.severity,
-                evidence={"note": f"Unknown check type: {check_type}"},
-                remediation=rule.remediation,
+                detail=f"unknown check type {check_type!r}; known: {self.check_types}",
             )
 
-        return cast("PolicyResult", handler(self, rule, event))
+        return handler(rule, event)
 
     def _check_action_blocklist(self, rule: PolicyRule, event: AuditEvent) -> PolicyResult:
         """Check if the action matches any blocked pattern."""
@@ -310,13 +359,3 @@ class PolicyEngine:
             },
             remediation=rule.remediation,
         )
-
-    # Dispatch table for check types
-    _check_handlers: dict[str, Any] = {
-        "action_blocklist": _check_action_blocklist,
-        "resource_pattern": _check_resource_pattern,
-        "content_scan": _check_content_scan,
-        "permission_required": _check_permission_required,
-        "result_required": _check_result_required,
-        "metadata_required": _check_metadata_required,
-    }
