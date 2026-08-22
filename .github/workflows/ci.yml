@@ -40,7 +40,7 @@ jobs:
           python-version: "3.11"
       - run: pip install -e ".[dev,sandbox,verify,observability]"
       - name: pip-audit (known vulnerabilities in installed dependencies)
-        run: pip-audit --strict --desc on
+        run: pip-audit --desc on  # no --strict: the editable local package itself is unauditable
 
   test:
     runs-on: ubuntu-latest

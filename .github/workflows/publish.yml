@@ -39,7 +39,7 @@ jobs:
       - name: Generate CycloneDX SBOM for the wheel
         uses: anchore/sbom-action@v0
         with:
-          file: dist/
+          path: dist/
           format: cyclonedx-json
           output-file: sbom.cyclonedx.json
           upload-artifact: false
