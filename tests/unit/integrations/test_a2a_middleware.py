@@ -187,7 +187,7 @@ class TestGovernedA2AClient:
 
     async def test_traversal_target_cannot_escape_agent_namespace(self, _a2a_setup: Any) -> None:
         """``../admin`` as a target must not escape the ``agent/`` namespace."""
-        registry, engine, audit, transport, _ = _a2a_setup
+        registry, engine, audit, transport, audit_dir = _a2a_setup
         agent = await registry.register(name="Coordinator", roles=["coordinator"])
 
         client = GovernedA2AClient(
@@ -200,3 +200,65 @@ class TestGovernedA2AClient:
         with pytest.raises(PermissionDeniedError):
             await client.send_message("../admin", {"task": "x"})
         transport.send.assert_not_called()
+        events = await FileAuditBackend(directory=audit_dir).read_all()
+        assert events[-1].result == "denied"
+        assert events[-1].resource == "<unresolved>"
+        assert events[-1].action == "a2a:send:<unresolved>"
+
+    async def test_interior_traversal_cannot_eat_namespace_prefix(self, _a2a_setup: Any) -> None:
+        """``agent/../peer`` must not become ``peer`` and slip past ``deny agent/*``."""
+        registry, _, audit, transport, audit_dir = _a2a_setup
+        engine = RBACEngine(
+            roles=[
+                Role(
+                    name="kill-switch",
+                    permissions=[
+                        Permission(action="*", resource="*", effect="allow"),
+                        Permission(action="*", resource="agent/*", effect="deny"),
+                    ],
+                )
+            ]
+        )
+        agent = await registry.register(name="Coordinator", roles=["kill-switch"])
+        client = GovernedA2AClient(
+            transport=transport,
+            agent_id=agent.agent_id,
+            registry=registry,
+            rbac_engine=engine,
+            audit_log=audit,
+        )
+        with pytest.raises(PermissionDeniedError):
+            await client.send_message("../peer", {"task": "x"})
+        transport.send.assert_not_called()
+        events = await FileAuditBackend(directory=audit_dir).read_all()
+        assert events[-1].resource == "<unresolved>"
+
+    async def test_action_axis_case_variant_cannot_evade_deny(self, _a2a_setup: Any) -> None:
+        """``Treasury-Agent`` must hit ``deny a2a:send:treasury-agent`` — the target is
+        caller-controlled and is embedded in the action, so it is canonicalised too."""
+        registry, _, audit, transport, audit_dir = _a2a_setup
+        engine = RBACEngine(
+            roles=[
+                Role(
+                    name="coordinator",
+                    permissions=[
+                        Permission(action="a2a:send:*", resource="*", effect="allow"),
+                        Permission(action="a2a:send:treasury-agent", resource="*", effect="deny"),
+                    ],
+                )
+            ]
+        )
+        agent = await registry.register(name="Coordinator", roles=["coordinator"])
+        client = GovernedA2AClient(
+            transport=transport,
+            agent_id=agent.agent_id,
+            registry=registry,
+            rbac_engine=engine,
+            audit_log=audit,
+        )
+        with pytest.raises(PermissionDeniedError):
+            await client.send_message("Treasury-Agent", {"task": "x"})
+        transport.send.assert_not_called()
+        events = await FileAuditBackend(directory=audit_dir).read_all()
+        assert events[-1].action == "a2a:send:treasury-agent"
+        assert events[-1].resource == "agent/treasury-agent"

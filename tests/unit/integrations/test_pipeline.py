@@ -264,16 +264,18 @@ class TestCanonicalizeResource:
     def test_canonicalize_table(self, raw: str, expected: str | None) -> None:
         assert canonicalize_resource(raw) == expected
 
-    def test_interior_traversal_collapses_to_its_true_target(self) -> None:
-        """``bureau/../admin/x`` is not rejected — it *is* ``admin/x``.
+    def test_any_upward_traversal_is_rejected(self) -> None:
+        """Every ``..`` segment is rejected, even one that ``normpath`` would absorb.
 
-        Resolving it to its true target is stricter than rejecting it: the
-        resource is then judged on its merits (and audited by its real name)
-        rather than recorded as an opaque ``<unresolved>``. Escaping upward out
-        of the string entirely is still rejected.
+        ``agent/../peer`` normalises to ``peer`` — the integrator's ``agent/``
+        namespace prefix has been eaten by caller-controlled input. The
+        enforcement point cannot know whether the downstream resolves paths the
+        same way, so the only fail-closed answer is to refuse.
         """
-        assert canonicalize_resource("bureau/../admin/x") == "admin/x"
+        assert canonicalize_resource("bureau/../admin/x") is None
+        assert canonicalize_resource("agent/../peer") is None
         assert canonicalize_resource("bureau/../../admin") is None
+        assert canonicalize_resource("a/b/../c") is None
 
     def test_canonicalized_output_is_idempotent(self) -> None:
         once = canonicalize_resource("  Bureau/./Experian/  ")

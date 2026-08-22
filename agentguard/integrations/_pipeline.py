@@ -116,6 +116,13 @@ def canonicalize_resource(raw: str) -> str | None:
         return None
     if stripped.startswith("/"):
         return None
+    # Reject upward traversal on the RAW segments, before normalisation: a
+    # ``..`` absorbed by a preceding segment (``agent/../peer`` -> ``peer``)
+    # would otherwise silently rewrite — and escape — an integrator-supplied
+    # namespace prefix. Rejecting is the only choice that cannot disagree with
+    # the downstream's own path semantics.
+    if ".." in stripped.split("/"):
+        return None
 
     normalized = posixpath.normpath(stripped)
     if normalized in {"", "."} or normalized.startswith("/"):
@@ -180,7 +187,10 @@ async def run_governed(
 
     Pipeline:
         1. Canonicalise the supplied resource.
-        2. Resolve agent identity.
+        2. Resolve agent identity. (An unknown ``agent_id`` raises
+           :class:`IdentityNotFoundError` *without* an audit record — there is
+           no identity to attribute the event to. Closing this gap is part of
+           agent authentication, Phase 3.5 of the realignment plan.)
         3. If the resource is unresolvable -> write a ``denied`` audit event
            against :data:`UNRESOLVED_RESOURCE` and raise
            :class:`PermissionDeniedError` without consulting RBAC.

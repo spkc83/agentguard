@@ -25,7 +25,7 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 import structlog
 
-from agentguard.integrations._pipeline import run_governed
+from agentguard.integrations._pipeline import canonicalize_resource, run_governed
 
 if TYPE_CHECKING:
     from agentguard.core.audit import AppendOnlyAuditLog
@@ -104,13 +104,22 @@ class GovernedA2AClient:
                 logging an ``error`` audit event).
         """
 
+        # The target is caller-controlled and appears in BOTH the action and the
+        # resource. Actions are matched case-sensitively (they are normally chosen
+        # by the integrator), so canonicalise the target once here and use the
+        # same canonical form on both axes: ``Treasury-Agent`` must hit a
+        # ``deny a2a:send:treasury-agent`` rule exactly like ``treasury-agent``.
+        canonical_target = canonicalize_resource(target_agent)
+        action = f"a2a:send:{canonical_target}" if canonical_target else "a2a:send:<unresolved>"
+        resource = f"agent/{canonical_target}" if canonical_target else None
+
         async def _execute() -> Any:
             return await self._transport.send(target_agent, message)
 
         return await run_governed(
             agent_id=self._agent_id,
-            action=f"a2a:send:{target_agent}",
-            resource=f"agent/{target_agent}",
+            action=action,
+            resource=resource,
             registry=self._registry,
             rbac_engine=self._rbac,
             audit_log=self._audit,
