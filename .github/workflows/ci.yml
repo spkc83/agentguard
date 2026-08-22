@@ -31,6 +31,17 @@ jobs:
       - run: pip install -e ".[dev]"
       - run: mypy agentguard/
 
+  audit-dependencies:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -e ".[dev,sandbox,verify,observability]"
+      - name: pip-audit (known vulnerabilities in installed dependencies)
+        run: pip-audit --strict --desc on
+
   test:
     runs-on: ubuntu-latest
     strategy:
@@ -46,3 +57,21 @@ jobs:
         env:
           AGENTGUARD_AUDIT_KEY: ci-test-key-0123456789abcdef0123456789abcdef
         run: pytest tests/unit/ -v --cov=agentguard --cov-report=term-missing --cov-fail-under=80
+
+  integration:
+    # Docker CLI + daemon are available on GitHub-hosted ubuntu runners; the
+    # sandbox backend talks to the runner's own socket via docker.from_env().
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -e ".[dev,sandbox]"
+      - run: docker pull python:3.11-slim
+      - name: Run integration + red-team (sandbox escape) tests
+        env:
+          AGENTGUARD_AUDIT_KEY: ci-test-key-0123456789abcdef0123456789abcdef
+        # --no-cov: the global addopts enforce --cov-fail-under=80, which is
+        # meaningless for this 7-test subset and would always fail the job.
+        run: pytest tests/integration tests/red_team -m "integration or red_team" -v --no-cov

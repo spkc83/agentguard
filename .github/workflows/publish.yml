@@ -26,9 +26,32 @@ jobs:
           name: dist
           path: dist/
 
+  sbom:
+    name: Generate SBOM (syft)
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download distributions
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - name: Generate CycloneDX SBOM for the wheel
+        uses: anchore/sbom-action@v0
+        with:
+          file: dist/
+          format: cyclonedx-json
+          output-file: sbom.cyclonedx.json
+          upload-artifact: false
+      - name: Upload SBOM
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: sbom.cyclonedx.json
+
   publish:
     name: Publish to PyPI
-    needs: build
+    needs: [build, sbom]
     if: github.event_name == 'release'
     runs-on: ubuntu-latest
     environment:
