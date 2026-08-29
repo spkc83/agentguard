@@ -1,15 +1,18 @@
-# Adverse Action Notice Generation
+# Adverse Action Notice Artifacts
 
-Narrow demo that focuses on the ECOA / Regulation B adverse action pipeline.
+Demo of truthful attribution, typed notice construction, and deterministic rendering. The sample is
+source-grounded in Regulation B Appendix C but still requires deployer-specific legal review; it
+does not perform delivery or write applicant data to an audit log.
 
 `notice_pipeline.py` covers four concerns:
 
-1. **Standard denial notice** — feature importances from a PD model become an
-   ordered, human-readable list of reasons.
-2. **Determinism** — identical inputs produce identical notices; this is a
-   regulatory requirement so that appeals can be reproduced exactly.
-3. **Custom reason map** — institutions often want their own wording or a
-   shorter cap (the default is four reasons per Regulation B).
+1. **Truthful attribution** — declared scorecard direction and a reference profile produce only
+   strictly positive points lost; arbitrary signed feature importance is not accepted.
+2. **Versioned mapping and determinism** — every transformed feature has an explicit deployer
+   binding, and identical attribution produces the same ranked local reason codes.
+3. **Complete typed artifact and canonical renderer** — applicant, creditor, requested terms,
+   actual notification timing, principal-reason provenance, ECOA disclosure, and explicit FCRA
+   applicability are validated before a C-3 profile is rendered and SHA-256 digested.
 4. **PII masking** — `PiiMasker` scrubs SSN / phone / account numbers out of
    text before it ever enters the audit log (see [CLAUDE.md](../../CLAUDE.md)
    PII rules).
@@ -21,6 +24,6 @@ pip install -e "."
 python examples/adverse_action_generation/notice_pipeline.py
 ```
 
-No audit log is written — this demo focuses on the notice object itself. For a
+No audit log is written — Phase 4.2 owns redacted notice references on the governed path. For a
 full flow including governance and audit, see
 [`examples/credit_decisioning/end_to_end_demo.py`](../credit_decisioning/end_to_end_demo.py).

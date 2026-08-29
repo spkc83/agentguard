@@ -6,6 +6,12 @@ Prerequisites:
 
 Run:
     python examples/quickstart.py
+
+Note:
+    The example appends to ./quickstart-audit. If you change
+    AGENTGUARD_AUDIT_KEY between runs, delete that directory first —
+    events signed under the old key correctly fail verification
+    (AuditTamperDetectedError) under the new one.
 """
 
 from __future__ import annotations

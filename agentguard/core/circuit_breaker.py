@@ -53,6 +53,7 @@ class CircuitBreaker:
         self._failure_count = 0
         self._last_failure_time = 0.0
         self._lock = asyncio.Lock()
+        self._half_open_probe_in_flight = False
 
     @property
     def state(self) -> CircuitState:
@@ -64,7 +65,13 @@ class CircuitBreaker:
             return CircuitState.HALF_OPEN
         return self._state
 
-    async def call(self, fn: Callable[..., Awaitable[T]], *args: Any, **kwargs: Any) -> T:
+    async def call(
+        self,
+        fn: Callable[..., Awaitable[T]],
+        *args: Any,
+        before_execute: Callable[[], Awaitable[None]] | None = None,
+        **kwargs: Any,
+    ) -> T:
         """Execute a function through the circuit breaker.
 
         Args:
@@ -78,26 +85,64 @@ class CircuitBreaker:
         Raises:
             CircuitOpenError: If the breaker is OPEN and recovery timeout hasn't elapsed.
         """
-        current_state = self.state
+        half_open_probe = await self._admit()
 
-        if current_state == CircuitState.OPEN:
-            logger.warning("circuit_breaker_rejected", breaker=self._name)
-            raise CircuitOpenError(self._name)
+        if before_execute is not None:
+            try:
+                await before_execute()
+            except BaseException:
+                if half_open_probe:
+                    await self._abort_half_open_probe()
+                raise
 
         try:
             result = await fn(*args, **kwargs)
+        except asyncio.CancelledError:
+            if half_open_probe:
+                await self._abort_half_open_probe()
+            raise
         except Exception:
-            await self._record_failure()
+            await self._record_failure(half_open_probe=half_open_probe)
             raise
 
-        await self._record_success()
+        await self._record_success(half_open_probe=half_open_probe)
         return result
 
-    async def _record_failure(self) -> None:
+    async def _admit(self) -> bool:
+        """Atomically admit a call and reserve the sole HALF_OPEN probe."""
+        async with self._lock:
+            now = time.monotonic()
+            if self._state == CircuitState.OPEN:
+                if now - self._last_failure_time < self._recovery_timeout:
+                    logger.warning("circuit_breaker_rejected", breaker=self._name)
+                    raise CircuitOpenError(self._name)
+                if self._half_open_probe_in_flight:
+                    logger.warning("circuit_breaker_rejected", breaker=self._name)
+                    raise CircuitOpenError(self._name)
+                self._state = CircuitState.HALF_OPEN
+                self._half_open_probe_in_flight = True
+                return True
+
+            if self._state == CircuitState.HALF_OPEN:
+                logger.warning("circuit_breaker_rejected", breaker=self._name)
+                raise CircuitOpenError(self._name)
+
+            return False
+
+    async def _abort_half_open_probe(self) -> None:
+        """Return an admitted but unexecuted probe to OPEN backoff."""
+        async with self._lock:
+            self._half_open_probe_in_flight = False
+            self._state = CircuitState.OPEN
+            self._last_failure_time = time.monotonic()
+
+    async def _record_failure(self, *, half_open_probe: bool) -> None:
         async with self._lock:
             self._failure_count += 1
             self._last_failure_time = time.monotonic()
-            if self._failure_count >= self._failure_threshold:
+            if half_open_probe:
+                self._half_open_probe_in_flight = False
+            if self._failure_count >= self._failure_threshold and self._state != CircuitState.OPEN:
                 self._state = CircuitState.OPEN
                 logger.warning(
                     "circuit_breaker_opened",
@@ -105,12 +150,15 @@ class CircuitBreaker:
                     failures=self._failure_count,
                 )
 
-    async def _record_success(self) -> None:
+    async def _record_success(self, *, half_open_probe: bool) -> None:
         async with self._lock:
-            self._failure_count = 0
-            if self._state in (CircuitState.HALF_OPEN, CircuitState.OPEN):
+            if half_open_probe:
+                self._half_open_probe_in_flight = False
+                self._failure_count = 0
                 self._state = CircuitState.CLOSED
                 logger.info("circuit_breaker_closed", breaker=self._name)
+            elif self._state == CircuitState.CLOSED:
+                self._failure_count = 0
 
 
 class TokenBucketRateLimiter:
@@ -124,10 +172,10 @@ class TokenBucketRateLimiter:
     def __init__(self, max_tokens: float, refill_rate: float) -> None:
         self._max_tokens = max_tokens
         self._refill_rate = refill_rate
-        self._buckets: dict[str, tuple[float, float]] = {}  # agent_id -> (tokens, last_time)
+        self._buckets: dict[tuple[str, str | None], tuple[float, float]] = {}
         self._lock = asyncio.Lock()
 
-    async def acquire(self, agent_id: str) -> None:
+    async def acquire(self, agent_id: str, action: str | None = None) -> None:
         """Consume one token for the given agent.
 
         Raises:
@@ -135,13 +183,14 @@ class TokenBucketRateLimiter:
         """
         async with self._lock:
             now = time.monotonic()
-            tokens, last_time = self._buckets.get(agent_id, (self._max_tokens, now))
+            key = (agent_id, action)
+            tokens, last_time = self._buckets.get(key, (self._max_tokens, now))
 
             # Refill tokens based on elapsed time
             elapsed = now - last_time
             tokens = min(self._max_tokens, tokens + elapsed * self._refill_rate)
 
             if tokens < 1.0:
-                raise RateLimitExceededError(agent_id, self._refill_rate)
+                raise RateLimitExceededError(agent_id, self._refill_rate, action)
 
-            self._buckets[agent_id] = (tokens - 1.0, now)
+            self._buckets[key] = (tokens - 1.0, now)

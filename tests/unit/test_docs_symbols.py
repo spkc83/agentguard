@@ -8,7 +8,9 @@ commands that were never implemented.
 
 from __future__ import annotations
 
+import ast
 import re
+import textwrap
 from pathlib import Path
 
 import pytest
@@ -40,14 +42,19 @@ _TRUTH_CHECKED_FILES = sorted(
 
 
 def _import_lines() -> list[str]:
-    """Every ``from agentguard...`` line inside a fenced python block."""
+    """Every ``from agentguard...`` import inside a fenced python block.
+
+    The blocks are parsed with :mod:`ast` rather than scanned line-by-line so
+    that multi-line parenthesised imports (as produced by ``ruff format``)
+    survive extraction intact.
+    """
     text = API_DOC.read_text(encoding="utf-8")
     lines: list[str] = []
     for block in _PYTHON_BLOCK.findall(text):
-        for raw in block.splitlines():
-            line = raw.strip()
-            if line.startswith("from agentguard"):
-                lines.append(line)
+        tree = ast.parse(textwrap.dedent(block))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and (node.module or "").startswith("agentguard"):
+                lines.append(ast.unparse(node))
     return lines
 
 

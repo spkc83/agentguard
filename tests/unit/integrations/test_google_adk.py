@@ -45,7 +45,7 @@ def _build_engine() -> RBACEngine:
 def _adk_setup(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> tuple[AgentRegistry, RBACEngine, AppendOnlyAuditLog, FakeAdkTool, Path]:
-    monkeypatch.setenv("AGENTGUARD_AUDIT_KEY", "test-key-adk")
+    monkeypatch.setenv("AGENTGUARD_AUDIT_KEY", "test-key-adk-padded-abcdefghijkl")
     audit_dir = tmp_path / "audit"
     audit_dir.mkdir()
     registry = AgentRegistry()

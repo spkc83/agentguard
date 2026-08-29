@@ -1,0 +1,33 @@
+NOTICE OF ACTION TAKEN
+
+Notice date: 2026-08-29
+Notice ID: NOTICE-001
+
+Creditor:
+Example Community Bank
+200 Bank Avenue
+Bismarck, ND 58501
+Telephone: 800-555-0100
+
+Applicant:
+Alex Example
+100 Main Street
+Bismarck, ND 58501
+
+Application: APP-001
+Credit requested: Installment loan
+Amount: $25,000.00
+Annual percentage rate: 8.50%
+Term: 48 months
+
+Action taken:
+We are unable to approve your application.
+
+Principal reasons:
+1. Excessive obligations in relation to income [AG-RB-C1-09]
+
+Equal Credit Opportunity Act notice:
+The Federal Equal Credit Opportunity Act prohibits creditors from discriminating against credit applicants on the basis of race, color, religion, national origin, sex, marital status, age (provided the applicant has the capacity to enter into a binding contract); because all or part of the applicant's income derives from any public assistance program; or because the applicant has in good faith exercised any right under the Consumer Credit Protection Act. The federal agency that administers compliance with this law concerning this creditor is:
+Federal Trade Commission
+600 Pennsylvania Avenue NW
+Washington, DC 20580

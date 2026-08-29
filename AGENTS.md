@@ -68,7 +68,7 @@ This file defines specialized agent roles for use with Claude Code's multi-agent
 **Owns:**
 - `agentguard/domains/finance/credit_risk/agent_templates.py` — credit decisioning agent templates
 - `agentguard/domains/finance/credit_risk/adverse_action.py` — adverse action notice generation (ECOA/Reg B compliant)
-- `agentguard/domains/finance/credit_risk/model_validation.py` — SR 11-7 model validation agent patterns
+- `agentguard/domains/finance/credit_risk/model_validation.py` — model validation agent patterns (historically SR 11-7-structured; SR 26-2 superseded SR 11-7 in April 2026)
 - `agentguard/domains/finance/credit_risk/fairness.py` — disparate impact / disparate treatment analysis tools
 - `agentguard/domains/finance/credit_risk/red_team.py` — credit AI adversarial evaluation suite (bias probes, monotonicity checks) *(planned; file does not exist yet)*
 - `agentguard/domains/finance/synthetic/wgan_gp.py` — WGAN-GP tabular data generator
@@ -81,22 +81,22 @@ This file defines specialized agent roles for use with Claude Code's multi-agent
 - `tests/unit/domains/`
 
 **Key constraints:**
-- Domain terminology must be accurate: PD/LGD/EAD, CECL, ECOA, Regulation B, Fair Housing Act, SR 11-7, Basel IRB, ALLL/ACL
+- Domain terminology must be accurate: PD/LGD/EAD, CECL, ECOA, Regulation B, Fair Housing Act, SR 26-2 (superseded SR 11-7, April 2026), Basel IRB, ALLL/ACL
 - Adverse action notices must cite specific, deterministic reasons ordered by impact (Regulation B requirement)
 - PII masking must cover all Category 1 PII and FCRA-regulated data before any data reaches the audit log
 - Synthetic credit data must include synthetic protected-class proxies for disparate impact testing — never infer real demographics
 - Fairness metrics (demographic parity, equalized odds, calibration) must be computed and logged; document which metric was optimized and why
 - All credit agent templates must be parameterizable — no hardcoded thresholds, institution names, or cut-off scores
-- Model validation agents must follow SR 11-7 structure: conceptual soundness, ongoing monitoring, outcomes analysis
+- Model validation agents keep the conceptual-soundness / ongoing-monitoring / outcomes-analysis structure (historically from SR 11-7; SR 26-2, which superseded it in April 2026, is principles-based and does not mandate this schema)
 - WGAN-GP generates credit application features: FICO, DTI, LTV, income, employment_status, loan_purpose, delinquency_history
 - The flagship domain is credit risk — credit decisioning, adverse action, model validation, and fairness analysis
 
 **Handoff contract (outputs):**
 - `SyntheticCreditDataset` — Pandas DataFrame with schema documented in `datasets/README.md`
-- `CreditDecisioningAgent` — AgentGuard-wrapped agent class ready for MCP/A2A use
+- `GovernedCreditAgent` — kernel-backed credit workflow with independently authorized actions
 - `AdverseActionNotice` Pydantic model — ECOA-compliant adverse action document
 - `FairnessReport` — disparate impact scorecard with 4/5ths rule calculations
-- `ModelValidationReport` — SR 11-7-aligned validation findings
+- `ModelValidationReport` — structured validation findings (conceptual soundness / monitoring / outcomes)
 
 ---
 
@@ -235,11 +235,13 @@ These interfaces must be agreed upon and locked before parallel development begi
 ```python
 # agentguard/models.py — shared Pydantic models
 
+
 class AgentIdentity(BaseModel):
     agent_id: str
     name: str
     roles: list[str]
     metadata: dict[str, str] = {}
+
 
 class PermissionContext(BaseModel):
     agent: AgentIdentity
@@ -249,9 +251,10 @@ class PermissionContext(BaseModel):
     granted: bool = False
     reason: str = ""
 
+
 class AuditEvent(BaseModel):
-    event_id: str          # UUID
-    timestamp: datetime    # UTC
+    event_id: str  # UUID
+    timestamp: datetime  # UTC
     agent_id: str
     action: str
     resource: str
@@ -259,7 +262,8 @@ class AuditEvent(BaseModel):
     result: Literal["allowed", "denied", "escalated", "error"]
     policy_results: list[PolicyResult] = []
     duration_ms: float
-    trace_id: str          # OpenTelemetry trace ID
+    trace_id: str  # OpenTelemetry trace ID
+
 
 class PolicyResult(BaseModel):
     rule_id: str

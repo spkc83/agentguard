@@ -8,6 +8,17 @@ from agentguard.compliance.formal_verifier import FormalVerifier, VerificationRe
 from agentguard.core.rbac import Permission, Role
 
 
+def _permission_index(roles: list[Role], action: str, resource: str) -> int:
+    permissions = sorted(
+        {
+            (permission.action, permission.resource)
+            for role in roles
+            for permission in role.permissions
+        }
+    )
+    return permissions.index((action, resource))
+
+
 class TestFormalVerifier:
     def test_rbac_escalation_safe(self) -> None:
         """Verify that analyst role cannot reach admin permission.
@@ -64,8 +75,20 @@ class TestFormalVerifier:
     def test_policy_consistency_no_contradictions(self) -> None:
         pytest.importorskip("z3")
         rules = [
-            {"id": "R1", "action_keyword": "read", "resource_keyword": "data", "effect": "allow"},
-            {"id": "R2", "action_keyword": "write", "resource_keyword": "data", "effect": "allow"},
+            {
+                "id": "R1",
+                "kind": "authorization",
+                "action_patterns": ["data:read"],
+                "resource_patterns": ["data/*"],
+                "effect": "allow",
+            },
+            {
+                "id": "R2",
+                "kind": "authorization",
+                "action_patterns": ["data:write"],
+                "resource_patterns": ["data/*"],
+                "effect": "deny",
+            },
         ]
         verifier = FormalVerifier()
         result = verifier.verify_policy_consistency(rules)
@@ -74,13 +97,286 @@ class TestFormalVerifier:
     def test_policy_consistency_contradiction_found(self) -> None:
         pytest.importorskip("z3")
         rules = [
-            {"id": "R1", "action_keyword": "read", "resource_keyword": "data", "effect": "allow"},
-            {"id": "R2", "action_keyword": "read", "resource_keyword": "data", "effect": "deny"},
+            {
+                "id": "R1",
+                "kind": "authorization",
+                "action_patterns": ["data:*"],
+                "resource_patterns": ["data/*"],
+                "effect": "allow",
+            },
+            {
+                "id": "R2",
+                "kind": "authorization",
+                "action_patterns": ["data:read"],
+                "resource_patterns": ["data/private/*"],
+                "effect": "deny",
+            },
         ]
         verifier = FormalVerifier()
         result = verifier.verify_policy_consistency(rules)
         assert result.status == "sat"
         assert len(result.details["contradictions"]) == 1
+
+    def test_policy_consistency_rejects_severity_derived_effects(self) -> None:
+        """Compliance severity is not an authorization effect."""
+        pytest.importorskip("z3")
+        result = FormalVerifier().verify_policy_consistency(
+            [
+                {
+                    "id": "R1",
+                    "action_keyword": "read",
+                    "resource_keyword": "",
+                    "effect": "deny",
+                }
+            ]
+        )
+
+        assert result.status == "unknown"
+        assert result.details["reason"] == "unsupported_policy_rule_schema"
+
+    def test_policy_consistency_rejects_unsupported_fnmatch_syntax(self) -> None:
+        pytest.importorskip("z3")
+        result = FormalVerifier().verify_policy_consistency(
+            [
+                {
+                    "id": "R1",
+                    "kind": "authorization",
+                    "action_patterns": ["data:[rw]ead"],
+                    "resource_patterns": ["data/*"],
+                    "effect": "allow",
+                }
+            ]
+        )
+
+        assert result.status == "unknown"
+        assert "unsupported fnmatch" in result.details["reason"]
+
+    def test_rbac_wildcard_permission_reaches_literal_target(self) -> None:
+        pytest.importorskip("z3")
+        roles = [
+            Role(
+                name="target-catalog",
+                permissions=[
+                    Permission(
+                        action="tool:credit_check",
+                        resource="bureau/experian",
+                        effect="deny",
+                    )
+                ],
+            ),
+            Role(
+                name="analyst",
+                permissions=[Permission(action="tool:*", resource="bureau/*", effect="allow")],
+            ),
+        ]
+
+        result = FormalVerifier().verify_rbac_escalation(
+            roles=roles,
+            target_permission_index=_permission_index(
+                roles, "tool:credit_check", "bureau/experian"
+            ),
+            forbidden_roles=["target-catalog"],
+        )
+
+        assert result.status == "sat"
+        assert result.details["action"] == "tool:credit_check"
+        assert result.details["resource"] == "bureau/experian"
+
+    def test_rbac_inherited_permission_reaches_target(self) -> None:
+        pytest.importorskip("z3")
+        roles = [
+            Role(
+                name="base",
+                permissions=[Permission(action="tool:*", resource="bureau/*", effect="allow")],
+            ),
+            Role(name="analyst", inherited_roles=["base"]),
+            Role(
+                name="target-catalog",
+                permissions=[
+                    Permission(
+                        action="tool:credit_check",
+                        resource="bureau/experian",
+                        effect="deny",
+                    )
+                ],
+            ),
+        ]
+
+        result = FormalVerifier().verify_rbac_escalation(
+            roles=roles,
+            target_permission_index=_permission_index(
+                roles, "tool:credit_check", "bureau/experian"
+            ),
+            forbidden_roles=["base", "target-catalog"],
+        )
+
+        assert result.status == "sat"
+        assert result.details["assigned_roles"] == ["analyst"]
+
+    def test_rbac_inherited_deny_overrides_wildcard_allow(self) -> None:
+        pytest.importorskip("z3")
+        roles = [
+            Role(
+                name="base",
+                permissions=[
+                    Permission(
+                        action="tool:credit_check",
+                        resource="bureau/*",
+                        effect="deny",
+                    )
+                ],
+            ),
+            Role(
+                name="analyst",
+                permissions=[Permission(action="tool:*", resource="bureau/*", effect="allow")],
+                inherited_roles=["base"],
+            ),
+            Role(
+                name="target-catalog",
+                permissions=[
+                    Permission(
+                        action="tool:credit_check",
+                        resource="bureau/experian",
+                        effect="deny",
+                    )
+                ],
+            ),
+        ]
+
+        result = FormalVerifier().verify_rbac_escalation(
+            roles=roles,
+            target_permission_index=_permission_index(
+                roles, "tool:credit_check", "bureau/experian"
+            ),
+            forbidden_roles=["base", "target-catalog"],
+        )
+
+        assert result.status == "unsat"
+
+    def test_rbac_unsupported_fnmatch_is_unknown(self) -> None:
+        pytest.importorskip("z3")
+        roles = [
+            Role(
+                name="analyst",
+                permissions=[Permission(action="tool:[rc]ead", resource="data/*", effect="allow")],
+            )
+        ]
+
+        result = FormalVerifier().verify_rbac_escalation(
+            roles=roles,
+            target_permission_index=0,
+        )
+
+        assert result.status == "unknown"
+        assert "unsupported fnmatch" in result.details["reason"]
+
+    def test_rbac_codepoint_above_z3_regex_maximum_is_unknown(self) -> None:
+        pytest.importorskip("z3")
+        unsupported = chr(0x30000)
+        roles = [
+            Role(
+                name="target-catalog",
+                permissions=[Permission(action=unsupported, resource="x", effect="deny")],
+            ),
+            Role(
+                name="candidate",
+                permissions=[Permission(action="*", resource="x", effect="allow")],
+            ),
+        ]
+
+        result = FormalVerifier().verify_rbac_escalation(
+            roles=roles,
+            target_permission_index=_permission_index(roles, unsupported, "x"),
+            forbidden_roles=["target-catalog"],
+        )
+
+        assert Permission(action="*", resource="x", effect="allow").matches(unsupported, "x")
+        assert result.status == "unknown"
+        assert "U+2FFFF" in result.details["reason"]
+
+    def test_rbac_action_case_sensitive_resource_case_insensitive(self) -> None:
+        pytest.importorskip("z3")
+        roles = [
+            Role(
+                name="target-catalog",
+                permissions=[
+                    Permission(
+                        action="tool:read",
+                        resource="admin/key",
+                        effect="deny",
+                    )
+                ],
+            ),
+            Role(
+                name="wrong-action-case",
+                permissions=[Permission(action="TOOL:*", resource="ADMIN/*", effect="allow")],
+            ),
+            Role(
+                name="right-action-case",
+                permissions=[Permission(action="tool:*", resource="ADMIN/*", effect="allow")],
+            ),
+        ]
+        target_index = _permission_index(roles, "tool:read", "admin/key")
+
+        wrong_case = FormalVerifier().verify_rbac_escalation(
+            roles=roles,
+            target_permission_index=target_index,
+            forbidden_roles=["target-catalog", "right-action-case"],
+        )
+        resource_casefolded = FormalVerifier().verify_rbac_escalation(
+            roles=roles,
+            target_permission_index=target_index,
+            forbidden_roles=["target-catalog", "wrong-action-case"],
+        )
+
+        assert wrong_case.status == "unsat"
+        assert resource_casefolded.status == "sat"
+
+    def test_rbac_sat_counterexample_replays_nonprintable_witness(self) -> None:
+        pytest.importorskip("z3")
+        roles = [
+            Role(
+                name="target-catalog",
+                permissions=[Permission(action="?", resource=":", effect="deny")],
+            ),
+            Role(
+                name="candidate",
+                permissions=[Permission(action="*", resource=":", effect="allow")],
+            ),
+        ]
+
+        result = FormalVerifier().verify_rbac_escalation(
+            roles=roles,
+            target_permission_index=_permission_index(roles, "?", ":"),
+            forbidden_roles=["target-catalog"],
+        )
+
+        assert result.status == "sat"
+        assert len(result.details["action"]) == 1
+        assert roles[0].permissions[0].matches(result.details["action"], result.details["resource"])
+
+    def test_shipped_policy_projection_is_not_certified(self) -> None:
+        """The CLI's legacy projection cannot manufacture policy effects."""
+        pytest.importorskip("z3")
+        from agentguard.compliance.engine import PolicyEngine
+
+        projected = []
+        for rule in PolicyEngine().all_rules:
+            check = rule.check
+            patterns = check.get("patterns", [""])
+            projected.append(
+                {
+                    "id": rule.id,
+                    "action_keyword": patterns[0] if patterns else "",
+                    "resource_keyword": "",
+                    "effect": "deny" if rule.severity == "critical" else "allow",
+                }
+            )
+
+        result = FormalVerifier().verify_policy_consistency(projected)
+
+        assert result.status == "unknown"
+        assert "contradictions" not in result.details
 
     def test_workflow_safety_with_hitl(self) -> None:
         """Target is not reachable without HITL — safe."""
@@ -158,24 +454,22 @@ class TestFormalVerifier:
         )
         assert r2.status == "unknown"
 
-    def test_compliance_engine_imports_without_z3(self) -> None:
-        """R6 C3: the rest of the compliance layer must be usable without z3 loaded.
+    def test_formal_verification_imports_z3_lazily(self) -> None:
+        """Formal-verification modules must not import z3 at module level.
 
-        Verified structurally: agentguard.compliance.engine and agentguard.compliance.hitl
-        do not import from z3 or z3_models at module level. A full 'z3 missing' smoke
-        test would require a subprocess/fresh interpreter; the structural check
-        documents the lazy-import contract established by ADR-013.
+        Nested imports are allowed because they preserve the optional dependency
+        contract established by ADR-013.
         """
         import ast
         from pathlib import Path
 
-        from agentguard.compliance import engine as engine_mod
-        from agentguard.compliance import hitl as hitl_mod
+        from agentguard.compliance import formal_verifier as formal_verifier_mod
+        from agentguard.compliance import z3_models as z3_models_mod
 
-        for mod in (engine_mod, hitl_mod):
-            src = Path(mod.__file__).read_text()
+        for mod in (formal_verifier_mod, z3_models_mod):
+            src = Path(mod.__file__).read_text(encoding="utf-8")
             tree = ast.parse(src)
-            for node in ast.walk(tree):
+            for node in tree.body:
                 if isinstance(node, ast.Import):
                     assert not any(n.name.startswith("z3") for n in node.names), (
                         f"{mod.__name__} imports z3 at module top level"
@@ -183,10 +477,6 @@ class TestFormalVerifier:
                 if isinstance(node, ast.ImportFrom):
                     assert node.module is None or not node.module.startswith("z3"), (
                         f"{mod.__name__} imports from z3 at module top level"
-                    )
-                    assert node.module != "agentguard.compliance.z3_models", (
-                        f"{mod.__name__} imports z3_models at module top level "
-                        "(must be deferred to keep z3 optional)"
                     )
 
 

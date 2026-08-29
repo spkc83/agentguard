@@ -1,5 +1,6 @@
 name: "EU AI Act High-Risk Requirements"
 version: "1.0"
+schema_version: 2
 description: >
   Policy rules based on EU AI Act requirements for high-risk AI systems.
   Credit scoring is explicitly classified as High-Risk AI under Annex III, Article 6.
@@ -8,6 +9,9 @@ description: >
 
 rules:
   - id: EU-AI-ACT-ART9-01
+    stage: attestation
+    applies_to: all
+    on_fail: warn
     name: "Article 9: Risk Management System"
     severity: critical
     description: >
@@ -24,6 +28,9 @@ rules:
       - https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=CELEX:32024R1689
 
   - id: EU-AI-ACT-ART9-02
+    stage: attestation
+    applies_to: all
+    on_fail: warn
     name: "Article 9: Residual Risk Mitigation"
     severity: high
     description: >
@@ -39,6 +46,9 @@ rules:
       - https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=CELEX:32024R1689
 
   - id: EU-AI-ACT-ART10-01
+    stage: attestation
+    applies_to: all
+    on_fail: warn
     name: "Article 10: Data Governance"
     severity: high
     description: >
@@ -54,6 +64,9 @@ rules:
       - https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=CELEX:32024R1689
 
   - id: EU-AI-ACT-ART10-02
+    stage: attestation
+    applies_to: all
+    on_fail: warn
     name: "Article 10: Bias Examination"
     severity: critical
     description: >
@@ -69,6 +82,9 @@ rules:
       - https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=CELEX:32024R1689
 
   - id: EU-AI-ACT-ART13-01
+    stage: attestation
+    applies_to: all
+    on_fail: warn
     name: "Article 13: Transparency"
     severity: high
     description: >
@@ -84,6 +100,9 @@ rules:
       - https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=CELEX:32024R1689
 
   - id: EU-AI-ACT-ART13-02
+    stage: attestation
+    applies_to: all
+    on_fail: warn
     name: "Article 13: Instructions for Use"
     severity: medium
     description: >
@@ -104,6 +123,10 @@ rules:
     description: >
       High-risk AI systems must be designed to allow effective human oversight.
       Human operators must be able to intervene, override, or stop the system.
+    stage: pre_tool
+    applies_to:
+      action: ["tool:credit_decision*", "tool:loan_approval*", "tool:risk_assessment*"]
+    on_fail: escalate
     check:
       type: content_scan
       targets: [action]
@@ -118,6 +141,9 @@ rules:
       - https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=CELEX:32024R1689
 
   - id: EU-AI-ACT-ART14-02
+    stage: attestation
+    applies_to: all
+    on_fail: warn
     name: "Article 14: Ability to Override"
     severity: high
     description: >
@@ -133,6 +159,9 @@ rules:
       - https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=CELEX:32024R1689
 
   - id: EU-AI-ACT-ART17-01
+    stage: attestation
+    applies_to: all
+    on_fail: warn
     name: "Article 17: Quality Management System"
     severity: high
     description: >
@@ -148,6 +177,9 @@ rules:
       - https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=CELEX:32024R1689
 
   - id: EU-AI-ACT-ART17-02
+    stage: attestation
+    applies_to: all
+    on_fail: warn
     name: "Article 17: Post-Market Monitoring"
     severity: medium
     description: >

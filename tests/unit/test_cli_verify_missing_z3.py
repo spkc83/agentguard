@@ -60,10 +60,10 @@ forbidden_roles: ["analyst"]
 
 
 def test_verify_policy_without_z3(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Without the verify extra, `verify policy` exits 1 with an install hint."""
+    """Policy checks are explicitly unsupported, independent of the optional verifier extra."""
     _break_z3(monkeypatch)
     result = runner.invoke(app, ["verify", "policy"])
-    assert result.exit_code == 1
+    assert result.exit_code == 2
     out = _flat(result.output)
-    assert "z3-solver is required" in out
-    assert "pip install 'agentguard[verify]'" in out
+    assert "unsupported" in out
+    assert "severity" in out

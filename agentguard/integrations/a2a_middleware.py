@@ -1,7 +1,7 @@
 """A2A (Agent-to-Agent) protocol middleware — governs inter-agent messages.
 
 Wraps agent-to-agent communication so every message passes through
-AgentGuard's governance pipeline (with error event logging on failure).
+AgentGuard's governance kernel.
 
 Usage:
     from agentguard.integrations.a2a_middleware import GovernedA2AClient
@@ -21,20 +21,24 @@ Usage:
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, cast, runtime_checkable
 
-import structlog
-
-from agentguard.integrations._pipeline import canonicalize_resource, run_governed
+from agentguard.guardrails import FrozenValue, GuardrailPayload, MessagePayload, thaw_payload
+from agentguard.guardrails.kernel import AdapterToolCall, canonicalize_resource
+from agentguard.integrations._pipeline import _adapter_kernel
 
 if TYPE_CHECKING:
-    from agentguard.core.audit import AppendOnlyAuditLog
-    from agentguard.core.circuit_breaker import CircuitBreaker
+    from collections.abc import Sequence
+
+    from agentguard.compliance.engine import PolicyEngine
+    from agentguard.core.audit import AuditLog
+    from agentguard.core.authentication import AgentCredentialProvider
+    from agentguard.core.circuit_breaker import CircuitBreaker, TokenBucketRateLimiter
     from agentguard.core.identity import AgentRegistry
     from agentguard.core.rbac import RBACEngine
+    from agentguard.guardrails import ChainMode, Guardrail
+    from agentguard.guardrails.kernel import GovernanceKernel
     from agentguard.observability.tracer import AgentTracer
-
-logger = structlog.get_logger()
 
 
 @runtime_checkable
@@ -47,36 +51,59 @@ class A2ATransport(Protocol):
 class GovernedA2AClient:
     """Governance-wrapped A2A client.
 
-    Intercepts agent-to-agent messages with identity resolution, RBAC,
-    circuit breaker, and audit logging.
+    Intercepts agent-to-agent messages through the shared
+    :class:`agentguard.guardrails.GovernanceKernel`.
 
     Args:
         transport: A2A transport (any object with async ``send`` method).
-        agent_id: The sending agent's registered ID.
+        agent_id: Legacy sending-agent ID. Omit for a secure kernel.
+        credential_provider: Secure-mode provider invoked exactly once for
+            each send attempt; returned credentials are never cached.
         registry: Agent identity registry.
         rbac_engine: RBAC permission checker.
         audit_log: Audit log for recording events.
+        kernel: Preconfigured governance kernel. Do not combine it with the
+            legacy dependency arguments.
         circuit_breaker: Optional circuit breaker.
         tracer: Optional :class:`AgentTracer` for OTel span emission.
+        chain_mode: Content-guardrail mode. ``shadow`` records would-be effects
+            without blocking or transforming; other governance remains active.
     """
 
     def __init__(
         self,
         transport: Any,
-        agent_id: str,
-        registry: AgentRegistry,
-        rbac_engine: RBACEngine,
-        audit_log: AppendOnlyAuditLog,
+        agent_id: str | None = None,
+        registry: AgentRegistry | None = None,
+        rbac_engine: RBACEngine | None = None,
+        audit_log: AuditLog | None = None,
         circuit_breaker: CircuitBreaker | None = None,
         tracer: AgentTracer | None = None,
+        *,
+        kernel: GovernanceKernel | None = None,
+        credential_provider: AgentCredentialProvider | None = None,
+        policy_engine: PolicyEngine | None = None,
+        guardrails: Sequence[Guardrail] | None = None,
+        rate_limiter: TokenBucketRateLimiter | None = None,
+        resolver_timeout: float = 1.0,
+        chain_mode: ChainMode | str | None = None,
     ) -> None:
         self._transport = transport
-        self._agent_id = agent_id
-        self._registry = registry
-        self._rbac = rbac_engine
-        self._audit = audit_log
-        self._breaker = circuit_breaker
-        self._tracer = tracer
+        self._caller = _adapter_kernel(
+            agent_id=agent_id,
+            credential_provider=credential_provider,
+            kernel=kernel,
+            registry=registry,
+            rbac_engine=rbac_engine,
+            audit_log=audit_log,
+            policy_engine=policy_engine,
+            guardrails=guardrails,
+            rate_limiter=rate_limiter,
+            circuit_breaker=circuit_breaker,
+            tracer=tracer,
+            resolver_timeout=resolver_timeout,
+            chain_mode=chain_mode,
+        )
 
     async def send_message(
         self,
@@ -104,26 +131,54 @@ class GovernedA2AClient:
                 logging an ``error`` audit event).
         """
 
-        # The target is caller-controlled and appears in BOTH the action and the
-        # resource. Actions are matched case-sensitively (they are normally chosen
-        # by the integrator), so canonicalise the target once here and use the
-        # same canonical form on both axes: ``Treasury-Agent`` must hit a
-        # ``deny a2a:send:treasury-agent`` rule exactly like ``treasury-agent``.
-        canonical_target = canonicalize_resource(target_agent)
-        action = f"a2a:send:{canonical_target}" if canonical_target else "a2a:send:<unresolved>"
-        resource = f"agent/{canonical_target}" if canonical_target else None
+        def _request() -> AdapterToolCall:
+            payload = MessagePayload(target=target_agent, message=message)
 
-        async def _execute() -> Any:
-            return await self._transport.send(target_agent, message)
+            def _canonical_target(native: Any) -> str:
+                # Canonicalise the target ONCE and build both axes from the
+                # same value. Canonicalising each axis separately re-opens the
+                # deny-evasion the pipeline closed at ADR-023: the action axis
+                # is not path-normalised, so "./peer" or "peer/" would carry a
+                # variant action string past an exact-action deny rule while
+                # the resource axis collapses to the canonical form. Raising
+                # here makes the call unresolvable — an audited, fail-closed
+                # denial — which also catches empty and whitespace targets
+                # before "agent/" can normalise to the bare "agent" resource.
+                canonical = canonicalize_resource(str(native["target"]))
+                if canonical is None or "/" in canonical:
+                    raise ValueError("A2A target does not canonicalise to a single agent name")
+                return canonical
 
-        return await run_governed(
-            agent_id=self._agent_id,
-            action=action,
-            resource=resource,
-            registry=self._registry,
-            rbac_engine=self._rbac,
-            audit_log=self._audit,
-            executor=_execute,
-            circuit_breaker=self._breaker,
-            tracer=self._tracer,
-        )
+            def _action(native: Any) -> str:
+                return f"a2a:send:{_canonical_target(native)}"
+
+            def _resource(native: Any) -> str:
+                return f"agent/{_canonical_target(native)}"
+
+            async def _execute(governed_payload: GuardrailPayload) -> Any:
+                if not isinstance(governed_payload, MessagePayload):
+                    raise TypeError("A2A sends require a message payload")
+                governed_message = thaw_payload(cast("FrozenValue", governed_payload.message))
+                assert isinstance(governed_message, dict)
+                message_send = getattr(self._transport, "message_send", None)
+                if message_send is not None:
+                    return await message_send(governed_payload.target, governed_message)
+                return await self._transport.send(governed_payload.target, governed_message)
+
+            return AdapterToolCall(
+                action=_action,
+                resource=_resource,
+                executor=_execute,
+                payload=payload,
+                fallback_action="a2a:send:<unresolved>",
+            )
+
+        return await self._caller.guarded_tool_call(_request)
+
+    async def message_send(
+        self,
+        target_agent: str,
+        message: dict[str, Any],
+    ) -> Any:
+        """A2A SDK-compatible alias for the governed message boundary."""
+        return await self.send_message(target_agent, message)

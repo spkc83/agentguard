@@ -20,10 +20,11 @@ import structlog
 from pydantic import BaseModel, ConfigDict
 
 from agentguard.compliance.z3_models import (
+    UnsupportedEncodingError,
     encode_policy_consistency,
-    encode_rbac_permissions,
+    encode_rbac_reachability,
 )
-from agentguard.core.rbac import Role
+from agentguard.core.rbac import Permission, Role
 
 logger = structlog.get_logger()
 
@@ -56,7 +57,50 @@ class FormalVerifier:
     """
 
     def __init__(self, timeout_ms: int = 10000) -> None:
+        if timeout_ms <= 0:
+            raise ValueError("timeout_ms must be positive")
         self._timeout_ms = timeout_ms
+
+    @staticmethod
+    def _permissions_by_assignable_role(roles: list[Role]) -> list[dict[str, Any]]:
+        """Flatten role inheritance exactly as ``RBACEngine`` does at runtime."""
+        role_map = {role.name: role for role in roles}
+
+        def collect(role_name: str, visited: set[str] | None = None) -> list[Permission]:
+            if visited is None:
+                visited = set()
+            if role_name in visited:
+                return []
+            visited.add(role_name)
+            role = role_map.get(role_name)
+            if role is None:
+                return []
+            permissions = list(role.permissions)
+            for parent_name in role.inherited_roles:
+                permissions.extend(collect(parent_name, visited))
+            return permissions
+
+        return [
+            {
+                "name": role_name,
+                "permissions": [permission.model_dump() for permission in collect(role_name)],
+            }
+            for role_name in role_map
+        ]
+
+    @staticmethod
+    def _model_string(model: Any, expression: Any, z3: Any) -> str:
+        """Extract a concrete Z3 string without display-escape ambiguity."""
+        value = model.evaluate(expression, model_completion=True)
+        length = model.evaluate(z3.Length(value), model_completion=True).as_long()
+        characters: list[str] = []
+        for index in range(length):
+            codepoint = model.evaluate(
+                z3.StrToCode(z3.SubString(value, index, 1)),
+                model_completion=True,
+            ).as_long()
+            characters.append(chr(codepoint))
+        return "".join(characters)
 
     def verify_rbac_escalation(
         self,
@@ -78,25 +122,39 @@ class FormalVerifier:
         Returns:
             VerificationResult with status 'unsat' if safe.
         """
-        # Build permission index map
         perm_set: set[tuple[str, str]] = set()
         for role in roles:
             for p in role.permissions:
                 perm_set.add((p.action, p.resource))
         perm_list = sorted(perm_set)
-        num_perms = max(len(perm_list), target_permission_index + 1)
+        if target_permission_index < 0 or target_permission_index >= len(perm_list):
+            return VerificationResult(
+                property_name="RBAC Privilege Escalation Absence",
+                status="unknown",
+                details={
+                    "reason": "target_permission_index_out_of_range",
+                    "target_index": target_permission_index,
+                },
+            )
 
-        # Encode roles
-        encoded_roles = []
-        for role in roles:
-            perms = []
-            for p in role.permissions:
-                if (p.action, p.resource) in perm_set:
-                    idx = perm_list.index((p.action, p.resource))
-                    perms.append({"index": idx, "effect": p.effect})
-            encoded_roles.append({"name": role.name, "permissions": perms})
+        target_action, target_resource = perm_list[target_permission_index]
+        try:
+            solver, ctx = encode_rbac_reachability(
+                self._permissions_by_assignable_role(roles),
+                target_action,
+                target_resource,
+                timeout_ms=self._timeout_ms,
+            )
+        except UnsupportedEncodingError as error:
+            return VerificationResult(
+                property_name="RBAC Privilege Escalation Absence",
+                status="unknown",
+                details={
+                    "reason": str(error),
+                    "target_index": target_permission_index,
+                },
+            )
 
-        solver, effective, ctx = encode_rbac_permissions(encoded_roles, num_perms)
         z3 = ctx["z3"]
         role_assigned = ctx["role_assigned"]
 
@@ -106,39 +164,49 @@ class FormalVerifier:
                 if rname in role_assigned:
                     solver.add(z3.Not(role_assigned[rname]))
 
-        # Check: can the target permission be reached?
-        target_bit = z3.BitVecVal(1 << target_permission_index, num_perms)
-        solver.add((effective & target_bit) == target_bit)
-
         result = solver.check()
-        status = str(result)
 
-        if status == "sat":
+        if result == z3.sat:
             model = solver.model()
             assigned = [
                 name
                 for name, var in role_assigned.items()
-                if model.evaluate(var, model_completion=True)
+                if z3.is_true(model.evaluate(var, model_completion=True))
             ]
+            action = self._model_string(model, ctx["action"], z3)
+            resource = self._model_string(model, ctx["resource"], z3)
             return VerificationResult(
                 property_name="RBAC Privilege Escalation Absence",
                 status="sat",
                 counterexample=(
-                    f"Roles {assigned} can reach permission index {target_permission_index}"
+                    f"Roles {assigned} can authorize action={action!r}, resource={resource!r} "
+                    f"within permission index {target_permission_index}"
                 ),
-                details={"assigned_roles": assigned, "target_index": target_permission_index},
+                details={
+                    "assigned_roles": assigned,
+                    "target_index": target_permission_index,
+                    "target_action_pattern": target_action,
+                    "target_resource_pattern": target_resource,
+                    "action": action,
+                    "resource": resource,
+                },
             )
-        elif status == "unsat":
+        if result == z3.unsat:
             return VerificationResult(
                 property_name="RBAC Privilege Escalation Absence",
                 status="unsat",
-                details={"target_index": target_permission_index},
+                details={
+                    "target_index": target_permission_index,
+                    "target_action_pattern": target_action,
+                    "target_resource_pattern": target_resource,
+                },
             )
-        else:
-            return VerificationResult(
-                property_name="RBAC Privilege Escalation Absence",
-                status="timeout" if "timeout" in status else "unknown",
-            )
+        reason = solver.reason_unknown()
+        return VerificationResult(
+            property_name="RBAC Privilege Escalation Absence",
+            status="timeout" if reason == "timeout" else "unknown",
+            details={"reason": reason},
+        )
 
     def verify_policy_consistency(
         self,
@@ -156,20 +224,32 @@ class FormalVerifier:
         Returns:
             VerificationResult with contradictions found (if any).
         """
-        solver, contradictions, z3 = encode_policy_consistency(rules)
+        try:
+            solver, contradictions, z3 = encode_policy_consistency(
+                rules, timeout_ms=self._timeout_ms
+            )
+        except UnsupportedEncodingError as error:
+            return VerificationResult(
+                property_name="Policy Set Consistency",
+                status="unknown",
+                details={"reason": str(error), "rules_checked": len(rules)},
+            )
 
         found_contradictions = []
+        unknown_reason = ""
         for c in contradictions:
             solver.push()
             solver.add(c["formula"])
             result = solver.check()
-            if str(result) == "sat":
+            if result == z3.sat:
                 found_contradictions.append(
                     {
                         "rule1": c["rule1"],
                         "rule2": c["rule2"],
                     }
                 )
+            elif result == z3.unknown:
+                unknown_reason = solver.reason_unknown()
             solver.pop()
 
         if found_contradictions:
@@ -178,6 +258,13 @@ class FormalVerifier:
                 status="sat",
                 counterexample=f"Found {len(found_contradictions)} contradicting rule pair(s)",
                 details={"contradictions": found_contradictions},
+            )
+
+        if unknown_reason:
+            return VerificationResult(
+                property_name="Policy Set Consistency",
+                status="timeout" if unknown_reason == "timeout" else "unknown",
+                details={"reason": unknown_reason, "rules_checked": len(rules)},
             )
 
         return VerificationResult(
@@ -201,9 +288,8 @@ class FormalVerifier:
         the safety property is violated (sat). If not reachable, the
         property holds (unsat).
 
-        We encode this as a Z3 satisfiability problem: create boolean
-        variables for each non-HITL edge being "used", and assert that
-        a path exists from source to target using only those edges.
+        This property is deliberately checked with a bounded Python BFS;
+        workflow safety is graph reachability, not an SMT encoding.
 
         Args:
             nodes: All nodes in the workflow graph.
@@ -215,12 +301,10 @@ class FormalVerifier:
         Returns:
             VerificationResult with status 'unsat' if safe.
         """
-        from agentguard.compliance.z3_models import encode_workflow_reachability
-
-        solver, non_hitl_edges, node_ids, z3 = encode_workflow_reachability(
-            nodes, edges, hitl_nodes
+        non_hitl_edges = tuple(
+            (src, dst) for src, dst in edges if src not in hitl_nodes and dst not in hitl_nodes
         )
-
+        node_ids = set(nodes)
         if source not in node_ids or target not in node_ids:
             return VerificationResult(
                 property_name="Workflow Safety",

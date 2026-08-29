@@ -13,6 +13,20 @@ class TestPiiDetector:
         assert len(ssn_matches) == 1
         assert ssn_matches[0].masked == "XXX-XX-6789"
 
+    def test_detect_valid_ssn_without_dashes(self) -> None:
+        detector = PiiDetector()
+
+        matches = detector.detect("SSN: 123456789")
+
+        assert [(match.pii_type, match.masked) for match in matches] == [("ssn", "XXXXX6789")]
+
+    def test_invalid_ssns_are_ignored(self) -> None:
+        detector = PiiDetector()
+
+        matches = detector.detect("000-12-3456 666-12-3456 912-12-3456 123-00-4567")
+
+        assert not [match for match in matches if match.pii_type == "ssn"]
+
     def test_detect_email(self) -> None:
         detector = PiiDetector()
         matches = detector.detect("Contact: john.doe@example.com")
@@ -27,6 +41,13 @@ class TestPiiDetector:
         phone_matches = [m for m in matches if m.pii_type == "phone"]
         assert len(phone_matches) == 1
         assert phone_matches[0].masked.endswith("4567")
+
+    def test_loan_amount_is_not_a_phone_number(self) -> None:
+        detector = PiiDetector()
+
+        matches = detector.detect("loan amount 2500000000")
+
+        assert not [match for match in matches if match.pii_type == "phone"]
 
     def test_no_pii(self) -> None:
         detector = PiiDetector()
@@ -70,3 +91,17 @@ class TestPiiMasker:
         result = masker.mask_dict(data)
         assert "123-45" not in result["items"][0]
         assert result["items"][1] == "clean text"
+
+    def test_mask_nested_containers_and_contextual_integer(self) -> None:
+        masker = PiiMasker()
+        data = {
+            "items": [{"borrower": {"email": "person@example.com"}}],
+            "account_number": 123456789012,
+            "loan_amount": 2500000000,
+        }
+
+        result = masker.mask_dict(data)
+
+        assert result["items"][0]["borrower"]["email"] == "p***@example.com"
+        assert result["account_number"] == "XXXXXXXX9012"
+        assert result["loan_amount"] == 2500000000

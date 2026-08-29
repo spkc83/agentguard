@@ -219,12 +219,16 @@ def policy_report(
     log_dir: Path = typer.Option("./audit-logs", help="Audit log directory."),
     policy_dir: Path = typer.Option(None, help="Policy YAML directory."),
     output_format: str = typer.Option("markdown", help="Output format: json or markdown."),
+    trusted_checkpoint: Path = typer.Option(
+        None,
+        help="Out-of-band trusted audit checkpoint required for clean attestation.",
+    ),
 ) -> None:
     """Generate a compliance report from audit events."""
     from agentguard.compliance.engine import PolicyEngine
     from agentguard.compliance.reporter import ComplianceReporter
-    from agentguard.core.audit import FileAuditBackend
-    from agentguard.exceptions import PolicyLoadError
+    from agentguard.core.audit import AppendOnlyAuditLog, AuditCheckpoint, FileAuditBackend
+    from agentguard.exceptions import AuditError, PolicyLoadError
 
     async def _report() -> None:
         backend = FileAuditBackend(directory=log_dir)
@@ -241,7 +245,18 @@ def policy_report(
             console.print(f"[red]Policy load failed:[/red] {e}")
             raise typer.Exit(code=1) from None
         reporter = ComplianceReporter(engine)
-        report = await reporter.generate_report(events)
+        try:
+            anchor = (
+                AuditCheckpoint.model_validate_json(trusted_checkpoint.read_text(encoding="utf-8"))
+                if trusted_checkpoint is not None
+                else None
+            )
+            report = await reporter.generate_report(
+                AppendOnlyAuditLog(backend=backend, trusted_checkpoint=anchor)
+            )
+        except (AuditError, OSError, ValueError) as e:
+            console.print(f"[red]Attestation refused:[/red] {e}")
+            raise typer.Exit(code=1) from None
 
         if output_format == "json":
             console.print(reporter.to_json(report))
@@ -298,7 +313,13 @@ def verify_rbac(
             Permission(action=p["action"], resource=p["resource"], effect=p["effect"])
             for p in r.get("permissions", [])
         ]
-        roles.append(Role(name=r["name"], permissions=perms))
+        roles.append(
+            Role(
+                name=r["name"],
+                permissions=perms,
+                inherited_roles=r.get("inherited_roles", []),
+            )
+        )
 
     # Compute the target permission index (matching the verifier's sort order)
     all_perms: set[tuple[str, str]] = set()
@@ -352,6 +373,7 @@ def verify_rbac(
         raise typer.Exit(code=1)
     else:
         console.print(f"[yellow]Verification result: {result.status}[/yellow]")
+        raise typer.Exit(code=2)
 
 
 @verify_app.command("policy")
@@ -369,45 +391,15 @@ def verify_policy(
         console.print(f"[red]Policy load failed:[/red] {e}")
         raise typer.Exit(code=1) from None
 
-    # Build simplified rule representations for Z3
-    rules = []
-    for rule in engine.all_rules:
-        check = rule.check
-        rules.append(
-            {
-                "id": rule.id,
-                "action_keyword": check.get("patterns", [""])[0] if check.get("patterns") else "",
-                "resource_keyword": "",
-                "effect": "deny" if rule.severity == "critical" else "allow",
-            }
-        )
-
+    rules = tuple(engine.all_rules)
     if not rules:
         console.print("[yellow]No policy rules found to verify.[/yellow]")
         return
-
-    try:
-        from agentguard.compliance.formal_verifier import FormalVerifier
-
-        result = FormalVerifier().verify_policy_consistency(rules)
-    except ImportError:
-        console.print(
-            "[red]z3-solver is required for formal verification.[/red]\n"
-            "Install with: pip install 'agentguard\\[verify]'"
-        )
-        raise typer.Exit(code=1) from None
-
-    if result.status == "unsat":
-        console.print(
-            f"[green]Policy consistency verified. "
-            f"{len(rules)} rules checked, no contradictions found.[/green]"
-        )
-    elif result.status == "sat":
-        console.print("[red]Contradictions found:[/red]")
-        for c in result.details.get("contradictions", []):
-            console.print(f"  {c['rule1']} <-> {c['rule2']}")
-    else:
-        console.print(f"[yellow]Verification result: {result.status}[/yellow]")
+    console.print(
+        "[yellow]Policy verification is unsupported for declarative checks: "
+        "no authorization effect is inferred from severity.[/yellow]"
+    )
+    raise typer.Exit(code=2)
 
 
 @observe_app.command("dashboard")

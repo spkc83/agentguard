@@ -46,7 +46,7 @@ def _build_engine() -> RBACEngine:
 def _lg_setup(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> tuple[AgentRegistry, RBACEngine, AppendOnlyAuditLog, FakeLangChainTool, Path]:
-    monkeypatch.setenv("AGENTGUARD_AUDIT_KEY", "test-key-lg")
+    monkeypatch.setenv("AGENTGUARD_AUDIT_KEY", "test-key-lg-padded-abcdefghijklm")
     audit_dir = tmp_path / "audit"
     audit_dir.mkdir()
     registry = AgentRegistry()

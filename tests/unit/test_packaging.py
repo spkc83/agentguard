@@ -11,6 +11,8 @@ import re
 import tomllib
 from pathlib import Path
 
+import agentguard
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PYPROJECT_PATH = REPO_ROOT / "pyproject.toml"
 
@@ -37,11 +39,20 @@ EXTRA_DIST_TO_MODULE = {
     "langchain-core": "langchain_core",
     "crewai": "crewai",
     "google-adk": "google.adk",
+    "mcp": "mcp",
+    "pyjwt": "jwt",
 }
 
-# Adapters are duck-typed until Phase 5.1 of docs/plans/guardrails-realignment.md
-# and therefore import no framework code yet.
-ALLOWED_UNIMPORTED = {"langgraph", "langchain-core", "crewai", "google-adk"}
+# PyJWT is intentionally loaded through ``importlib`` so importing
+# ``agentguard.core`` does not require the optional auth extra.
+ALLOWED_UNIMPORTED = {
+    "langgraph",
+    "langchain-core",
+    "crewai",
+    "google-adk",
+    "mcp",  # The adapter is intentionally duck-typed; native MCP is covered by optional tests.
+    "pyjwt",
+}
 
 SEARCH_DIRS = ("agentguard", "scripts", "examples")
 
@@ -126,6 +137,12 @@ def test_version_matches_readme() -> None:
         f"pyproject version '{version}' does not appear in the README "
         "'Current Status' heading — update one or the other."
     )
+
+
+def test_package_version_matches_pyproject() -> None:
+    """The runtime package version must match the distribution metadata."""
+    pyproject = _load_pyproject()
+    assert agentguard.__version__ == pyproject["project"]["version"] == "0.9.0"
 
 
 def test_py_typed_present() -> None:

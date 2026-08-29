@@ -46,7 +46,7 @@ def _build_engine() -> RBACEngine:
 def _crew_setup(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> tuple[AgentRegistry, RBACEngine, AppendOnlyAuditLog, FakeCrewAITool, Path]:
-    monkeypatch.setenv("AGENTGUARD_AUDIT_KEY", "test-key-crew")
+    monkeypatch.setenv("AGENTGUARD_AUDIT_KEY", "test-key-crew-padded-abcdefghijk")
     audit_dir = tmp_path / "audit"
     audit_dir.mkdir()
     registry = AgentRegistry()
@@ -69,7 +69,7 @@ class TestGovernedCrewAITool:
             audit_log=audit,
             resource="index/public",
         )
-        result = await governed.run("query text")
+        result = await governed.arun("query text")
         assert result == {"data": "found"}
         tool._run.assert_called_once_with("query text")
 
@@ -101,7 +101,7 @@ class TestGovernedCrewAITool:
             resource="index/public",
             circuit_breaker=breaker,
         )
-        result = await governed.run("test")
+        result = await governed.arun("test")
         assert result == {"data": "found"}
 
     async def test_audit_events_written(self, _crew_setup: Any) -> None:
@@ -116,7 +116,7 @@ class TestGovernedCrewAITool:
             audit_log=audit,
             resource="index/public",
         )
-        await governed.run("query")
+        await governed.arun("query")
 
         events = await FileAuditBackend(directory=audit_dir).read_all()
         assert len(events) >= 1
@@ -154,7 +154,7 @@ class TestGovernedCrewAITool:
             audit_log=audit,
             resource=_resolver,
         )
-        await governed.run("q", limit=5)
+        await governed.arun("q", limit=5)
         assert seen == [{"args": ("q",), "kwargs": {"limit": 5}}]
         tool._run.assert_called_once_with("q", limit=5)
 
@@ -179,7 +179,7 @@ class TestCrewAIResourceIsNotAgentSupplied:
         governed = self._governed(_crew_setup, agent.agent_id, "admin/settings", admin_tool)
 
         with pytest.raises(TypeError, match="_resource is no longer accepted"):
-            await governed.run("delete", _resource="public/report")
+            await governed.arun("delete", _resource="public/report")
         admin_tool._run.assert_not_called()
 
     async def test_raising_resolver_is_denied_and_audited(self, _crew_setup: Any) -> None:
@@ -193,7 +193,7 @@ class TestCrewAIResourceIsNotAgentSupplied:
 
         governed = self._governed(_crew_setup, agent.agent_id, _boom, admin_tool)
         with pytest.raises(PermissionDeniedError) as excinfo:
-            await governed.run("delete")
+            await governed.arun("delete")
         assert excinfo.value.resource == UNRESOLVED_RESOURCE
         admin_tool._run.assert_not_called()
 
@@ -211,7 +211,7 @@ class TestCrewAIResourceIsNotAgentSupplied:
         governed = self._governed(_crew_setup, agent.agent_id, lambda _: bad, admin_tool)
 
         with pytest.raises(PermissionDeniedError):
-            await governed.run("delete")
+            await governed.arun("delete")
         admin_tool._run.assert_not_called()
 
         events = await FileAuditBackend(directory=audit_dir).read_all()
@@ -226,7 +226,7 @@ class TestCrewAIResourceIsNotAgentSupplied:
         governed = self._governed(_crew_setup, agent.agent_id, "*", admin_tool)
 
         with pytest.raises(PermissionDeniedError) as excinfo:
-            await governed.run("delete")
+            await governed.arun("delete")
         assert excinfo.value.resource == UNRESOLVED_RESOURCE
         admin_tool._run.assert_not_called()
 
@@ -240,7 +240,7 @@ class TestCrewAIResourceIsNotAgentSupplied:
         )
 
         with pytest.raises(PermissionDeniedError) as excinfo:
-            await governed.run(target="settings")
+            await governed.arun(target="settings")
         assert excinfo.value.resource == "admin/settings"
         admin_tool._run.assert_not_called()
 
@@ -252,7 +252,7 @@ class TestCrewAIResourceIsNotAgentSupplied:
         governed = self._governed(_crew_setup, agent.agent_id, "Admin/Settings", admin_tool)
 
         with pytest.raises(PermissionDeniedError):
-            await governed.run("delete")
+            await governed.arun("delete")
         admin_tool._run.assert_not_called()
 
         events = await FileAuditBackend(directory=audit_dir).read_all()
@@ -265,7 +265,7 @@ class TestCrewAIResourceIsNotAgentSupplied:
         admin_tool = FakeCrewAITool("admin_op", result="done")
         governed = self._governed(_crew_setup, agent.agent_id, "public/report", admin_tool)
 
-        assert await governed.run("read") == "done"
+        assert await governed.arun("read") == "done"
         admin_tool._run.assert_called_once_with("read")
 
     async def test_async_resolver(self, _crew_setup: Any) -> None:
@@ -277,7 +277,7 @@ class TestCrewAIResourceIsNotAgentSupplied:
             return f"index/{call_input['args'][0]}"
 
         governed = self._governed(_crew_setup, agent.agent_id, _resolver, tool)
-        assert await governed.run("public") == {"data": "found"}
+        assert await governed.arun("public") == {"data": "found"}
 
         events = await FileAuditBackend(directory=audit_dir).read_all()
         assert events[0].resource == "index/public"
@@ -288,6 +288,6 @@ class TestCrewAIResourceIsNotAgentSupplied:
         agent = await registry.register(name="Bot", roles=["analyst"])
         governed = self._governed(_crew_setup, agent.agent_id, "Index/Public", tool)
 
-        assert await governed.run("q") == {"data": "found"}
+        assert await governed.arun("q") == {"data": "found"}
         events = await FileAuditBackend(directory=audit_dir).read_all()
         assert events[0].resource == "index/public"

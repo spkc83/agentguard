@@ -69,9 +69,57 @@ jobs:
           python-version: "3.11"
       - run: pip install -e ".[dev,sandbox]"
       - run: docker pull python:3.11-slim
+      - name: Verify Docker SDK and daemon
+        run: |
+          python - <<'PY'
+          import docker
+
+          client = docker.from_env()
+          try:
+              if not client.ping():
+                  raise RuntimeError("Docker daemon ping failed")
+          finally:
+              client.close()
+          PY
       - name: Run integration + red-team (sandbox escape) tests
         env:
           AGENTGUARD_AUDIT_KEY: ci-test-key-0123456789abcdef0123456789abcdef
         # --no-cov: the global addopts enforce --cov-fail-under=80, which is
         # meaningless for this 7-test subset and would always fail the job.
         run: pytest tests/integration tests/red_team -m "integration or red_team" -v --no-cov
+
+  adapter-extras:
+    name: Adapter extras (${{ matrix.extra }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        extra: [langgraph, crewai, adk, mcp]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install uv
+      - run: uv sync --frozen --extra dev --extra ${{ matrix.extra }}
+      - name: Run native adapter boundary tests
+        env:
+          AGENTGUARD_AUDIT_KEY: ci-test-key-0123456789abcdef0123456789abcdef
+        run: uv run pytest tests/unit/integrations/test_real_adapters.py -v --no-cov
+
+  finance-extra:
+    # The WGAN-GP determinism tests importorskip torch, so without this job
+    # the seeded-training claims would never be exercised anywhere.
+    name: Finance extra (torch)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install uv
+      - run: uv sync --frozen --extra dev --extra finance
+      - name: Run WGAN-GP + synthetic data tests
+        env:
+          AGENTGUARD_AUDIT_KEY: ci-test-key-0123456789abcdef0123456789abcdef
+        run: uv run pytest tests/unit/domains/finance/test_wgan_gp.py tests/unit/domains/finance/test_generators.py -v --no-cov

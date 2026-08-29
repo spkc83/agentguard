@@ -10,7 +10,10 @@ Public API:
 
 Every adapter derives the RBAC resource from a :data:`ResourceResolver`
 configured at construction time; none of them accept a resource from the
-governed agent at call time. See :mod:`agentguard.integrations._pipeline`.
+governed agent at call time. Each adapter delegates runtime enforcement to
+:class:`agentguard.guardrails.GovernanceKernel`; the private
+:mod:`agentguard.integrations._pipeline` module only preserves legacy imports
+and constructor assembly.
 """
 
 from agentguard.integrations._pipeline import (

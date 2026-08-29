@@ -11,8 +11,9 @@ from agentguard.observability.dashboard import (
     DashboardMetrics,
     MetricsDashboard,
     PolicyViolationTrend,
+    ShadowGuardrailSummary,
 )
-from agentguard.observability.replay import ReplayDebugger, ReplayEntry
+from agentguard.observability.replay import ReplayDebugger, ReplayEntry, ShadowEvaluationView
 from agentguard.observability.tracer import AgentTracer
 
 __all__ = [
@@ -23,4 +24,6 @@ __all__ = [
     "PolicyViolationTrend",
     "ReplayDebugger",
     "ReplayEntry",
+    "ShadowEvaluationView",
+    "ShadowGuardrailSummary",
 ]

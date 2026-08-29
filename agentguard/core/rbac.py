@@ -11,7 +11,7 @@ Pattern matching is platform-independent (``fnmatchcase``, never the
 ``normcase``-applying ``fnmatch``): actions match case-sensitively, resources
 case-insensitively. See :class:`Permission` for why the two differ. Callers are
 expected to hand this engine a canonical resource — see
-:func:`agentguard.integrations._pipeline.canonicalize_resource`.
+:func:`agentguard.guardrails.kernel.canonicalize_resource`.
 """
 
 from __future__ import annotations

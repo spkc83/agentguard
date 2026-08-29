@@ -47,13 +47,51 @@ import pandas as pd
 df = pd.read_parquet("datasets/synthetic_credit_applications_v1/data.parquet")
 ```
 
-The schema is defined by
-[`agentguard.domains.finance.synthetic.generators.CreditApplicationSchema`](../agentguard/domains/finance/synthetic/generators.py).
+The canonical testing API is
+[`agentguard.testing.synthetic`](../agentguard/testing/synthetic.py):
+
+```python
+from agentguard.testing import SyntheticCreditGenerator, is_synthetic_approval
+
+rows = SyntheticCreditGenerator(seed=4600, default_rate=0.08, bias=0.0).generate(1000)
+approval_rate = sum(map(is_synthetic_approval, rows)) / len(rows)
+```
+
+The pre-1.0 `agentguard.domains.finance.synthetic.generators` namespace remains
+an identity-preserving compatibility re-export.
+
+## Statistical generator contract
+
+`default_rate` must be finite and strictly between zero and one. `bias` must be
+finite and between zero and one inclusive, and sample counts must be positive.
+The generator uses only its private seeded random-number generator; equal
+constructor inputs and call sequences produce byte-identical ordered records.
+
+Rows are produced in one dependency-ordered pass. Income is generated from
+latent credit quality; property value is generated from income; requested loan
+amount is generated from income and property value; and the reported LTV is
+exactly requested loan divided by the internal property value. DTI is exactly
+annual existing obligations plus the proposed annual principal obligation,
+divided by annual income, then bounded to `[0, 1]`. The internal property and
+obligation intermediates are intentionally omitted to preserve the published
+record schema. Default probability is computed separately from FICO, DTI, LTV,
+delinquencies, and utilization around the configured portfolio base rate.
+
+The fixed benchmark approval predicate does not use `is_default`: approval
+requires FICO at least 660, DTI at most 0.43, and LTV at most 0.90. With seed
+4600 and 40,000 rows, `bias=0` yields DI 0.998, while the deliberately biased
+`bias=0.75` fixture yields DI 0.642 (the locked acceptance target is
+approximately 0.65 with absolute tolerance 0.03). DI compares artificial
+`group_a` with the pooled `group_b`–`group_d` reference rows.
 
 ## Data ethics
 
 - No real customer records are ever included.
-- Protected-class proxies are synthetic labels assigned uniformly at random;
-  they are **not** inferences from any real demographic data.
+- Group labels are assigned uniformly at random and are **not** inferences from
+  any real demographic data. At `bias=0`, labels are independent of latent
+  credit quality. Positive `bias` deliberately shifts only artificial
+  `group_a` so fairness tooling has a measurable evaluation control.
+- Biased fixtures are tests of disparity detection, not production credit
+  models, underwriting recommendations, or representative population data.
 - Do not commit generated parquet/jsonl files to the repository — the script
   is the source of truth, not its output.

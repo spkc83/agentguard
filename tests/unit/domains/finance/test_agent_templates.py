@@ -1,84 +1,85 @@
-"""Tests for agentguard.domains.finance.credit_risk.agent_templates."""
+"""Tests for the pure credit-decision policy boundary."""
 
 from __future__ import annotations
 
+import math
+
+import pytest
+from pydantic import ValidationError
+
 from agentguard.domains.finance.credit_risk.agent_templates import (
-    CreditDecisionConfig,
-    CreditDecisioningAgent,
+    CreditDecisionOutcome,
+    CreditDecisionPolicy,
+    CreditDecisionPolicyConfig,
 )
 
 
-class TestCreditDecisioningAgent:
-    def test_auto_approve(self) -> None:
-        agent = CreditDecisioningAgent()
-        decision = agent.evaluate("APP-001", pd_score=0.02)
-        assert decision.decision == "approved"
-        assert decision.requires_review is False
-
-    def test_auto_decline(self) -> None:
-        agent = CreditDecisioningAgent()
-        decision = agent.evaluate("APP-001", pd_score=0.25)
-        assert decision.decision == "declined"
-        assert decision.requires_review is False
-
-    def test_review_band(self) -> None:
-        agent = CreditDecisioningAgent()
-        decision = agent.evaluate("APP-001", pd_score=0.10)
-        assert decision.decision == "review"
-        assert decision.requires_review is True
-
-    def test_low_fico_decline(self) -> None:
-        agent = CreditDecisioningAgent()
-        decision = agent.evaluate(
-            "APP-001",
-            pd_score=0.10,
-            application={"fico_score": 500, "dti_ratio": 0.60},
+class TestCreditDecisionPolicy:
+    @pytest.mark.parametrize(
+        ("pd_score", "expected"),
+        [
+            (0.049999, CreditDecisionOutcome.APPROVE),
+            (0.05, CreditDecisionOutcome.REVIEW),
+            (0.199999, CreditDecisionOutcome.REVIEW),
+            (0.20, CreditDecisionOutcome.DECLINE),
+        ],
+    )
+    def test_exact_band_boundaries(
+        self,
+        pd_score: float,
+        expected: CreditDecisionOutcome,
+    ) -> None:
+        candidate = CreditDecisionPolicy().evaluate(
+            decision_id="DECISION-001",
+            application_ref="APPLICATION-001",
+            pd_score=pd_score,
+            model_id="pd-model",
+            model_version="1",
         )
-        # Two hard-cutoff failures + PD in review band -> declined
-        assert decision.decision == "declined"
+        assert candidate.outcome is expected
+        assert candidate.requires_review is (expected is CreditDecisionOutcome.REVIEW)
 
-    def test_custom_thresholds(self) -> None:
-        config = CreditDecisionConfig(
+    @pytest.mark.parametrize("pd_score", [-0.01, 1.01, math.inf, math.nan, True])
+    def test_invalid_pd_fails_before_policy_output(self, pd_score: float) -> None:
+        with pytest.raises(ValidationError):
+            CreditDecisionPolicy().evaluate(
+                decision_id="DECISION-001",
+                application_ref="APPLICATION-001",
+                pd_score=pd_score,
+                model_id="pd-model",
+                model_version="1",
+            )
+
+    def test_policy_config_is_versioned_and_thresholds_are_ordered(self) -> None:
+        config = CreditDecisionPolicyConfig(
+            policy_id="credit-policy",
+            policy_version="2026-08",
             auto_approve_threshold=0.03,
             decline_threshold=0.15,
         )
-        agent = CreditDecisioningAgent(config=config)
-        # PD=0.04 is above 0.03 auto-approve, below 0.15 decline -> review
-        decision = agent.evaluate("APP-001", pd_score=0.04)
-        assert decision.decision == "review"
-
-    def test_feature_importances_populated(self) -> None:
-        agent = CreditDecisioningAgent()
-        decision = agent.evaluate(
-            "APP-001",
-            pd_score=0.25,
-            application={"fico_score": 650, "dti_ratio": 0.40},
+        candidate = CreditDecisionPolicy(config).evaluate(
+            decision_id="DECISION-001",
+            application_ref="APPLICATION-001",
+            pd_score=0.04,
+            model_id="pd-model",
+            model_version="1",
         )
-        assert "pd_score" in decision.feature_importances
-        assert "fico_score" in decision.feature_importances
-
-    def test_high_dti_flagged(self) -> None:
-        agent = CreditDecisioningAgent()
-        decision = agent.evaluate(
-            "APP-001",
-            pd_score=0.10,
-            application={"dti_ratio": 0.55},
+        assert candidate.outcome is CreditDecisionOutcome.REVIEW
+        assert (candidate.policy_id, candidate.policy_version) == (
+            "credit-policy",
+            "2026-08",
         )
-        assert any("DTI" in r for r in decision.reasons)
 
-    def test_high_loan_amount_flagged(self) -> None:
-        agent = CreditDecisioningAgent()
-        decision = agent.evaluate(
-            "APP-001",
-            pd_score=0.10,
-            application={"loan_amount": 600000},
-        )
-        assert any("Loan amount" in r for r in decision.reasons)
+        with pytest.raises(ValidationError, match="below"):
+            CreditDecisionPolicyConfig(
+                auto_approve_threshold=0.20,
+                decline_threshold=0.20,
+            )
 
-
-class TestCreditDecisionConfig:
-    def test_defaults(self) -> None:
-        config = CreditDecisionConfig()
+    def test_defaults_are_explicit_and_frozen(self) -> None:
+        config = CreditDecisionPolicyConfig()
         assert config.auto_approve_threshold == 0.05
         assert config.decline_threshold == 0.20
-        assert config.min_fico_score == 620
+        assert (config.policy_id, config.policy_version) == ("pd-bands", "1")
+        with pytest.raises(ValidationError):
+            config.policy_version = "2"

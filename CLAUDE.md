@@ -31,7 +31,7 @@ agentguard/
 │   │       ├── credit_risk/
 │   │       │   ├── agent_templates.py   # Credit decisioning agent (auto/review/decline)
 │   │       │   ├── adverse_action.py    # ECOA/Reg B adverse action notice generation
-│   │       │   ├── model_validation.py  # SR 11-7 validation workflow + findings
+│   │       │   ├── model_validation.py  # Model validation workflow + findings
 │   │       │   └── fairness.py          # Disparate impact, equalized odds, calibration
 │   │       ├── synthetic/
 │   │       │   ├── wgan_gp.py           # WGAN-GP for tabular credit data (PyTorch)
@@ -207,7 +207,7 @@ The owner has 17 years of finance domain experience. Reference these correctly:
 - **ECOA** = Equal Credit Opportunity Act — prohibits discrimination in credit decisions; requires adverse action notices
 - **Fair Housing Act (FHA)** — prohibits discriminatory lending on housing-related credit
 - **Adverse action notice** — required when credit is denied; must cite specific reasons (Regulation B)
-- **SR 11-7** — Federal Reserve / OCC guidance on model risk management; requires independent model validation, ongoing monitoring, documentation
+- **SR 11-7 / SR 26-2** — Federal Reserve model risk management guidance. SR 11-7 (2011) required independent model validation, ongoing monitoring, documentation; SR 26-2 (April 17, 2026, interagency with OCC/FDIC) superseded it with a principles-based, risk-scaled framework. Cite SR 26-2 as current guidance; SR 11-7 only as historical context
 - **CECL** = Current Expected Credit Loss — FASB ASC 326; forward-looking loss reserve methodology replacing incurred-loss model
 - **Basel III/IV** — international capital adequacy standards; PD/LGD/EAD models are regulatory capital models subject to validation
 - **FINOS AIGF v2.0** — FINOS AI Governance Framework for financial services. The shipped bundle is 15 AgentGuard-local controls informed by it, with `AG-FINOS-NNN` IDs. Do **not** invent official FINOS `AIR-*` risk IDs; a real crosswalk to the FINOS risk registry requires domain review.
