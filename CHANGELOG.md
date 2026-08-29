@@ -8,6 +8,40 @@ reaches 1.0.
 
 ## [Unreleased]
 
+### Added (limitation closures, 2026-08-29)
+
+- Added a governed path for non-model adverse-action reasons. A `policy_rule` reason is produced
+  only by evaluating a versioned `CreditPolicyBundle` over the complete declared fact schema for
+  one application/decision, and `PolicyReasonIntegrityGuardrail` recomputes every finding and
+  requires exact equality (`AA.POLICY_REASON_UNBOUND` on any drift). A `human_review` reason binds
+  a `ReviewJudgment` to the completed review lineage that `decision:override` verifies, with codes
+  drawn only from the versioned ECOA registry (`AA.REVIEW_REASON_UNBOUND` otherwise). Mixed
+  notices order principal reasons by decision chronology (policy overlay, then model, then human
+  review) with deterministic within-basis ordering, and `prepare_notice_record` accepts only the
+  selection recomputed from the decision's own bases. A decline with no truthful basis stays
+  denied. Deferred: a pre-scoring decline (no model score at all) still cannot be represented
+  because the signed evidence shapes require a model reference.
+- Made the audit rollback anchor operational: `agentguard audit export-checkpoint` writes the
+  signed head checkpoint (refusing to overwrite a newer witness), `agentguard audit verify
+  --trusted-checkpoint` fails closed when the local head is behind the witness, and
+  `AuditCollectorServer` accepts a `trusted_checkpoint_path` outside its state directory that it
+  refuses to start behind and atomically re-exports after each checkpoint. Rollback of the whole
+  evidence set is now detectable exactly as far as the witness is replicated off-host; that trust
+  boundary is documented in ARCHITECTURE.md.
+- Made audit key rotation survivable: `AuditKeyring.from_environment` also reads
+  `AGENTGUARD_AUDIT_KEYS` (JSON epochs beyond the primary key, each under the same ≥32-byte
+  floor), and `rotate_key` on an environment-sourced keyring refuses up front
+  (`AuditKeyRotationRefusedError`) unless the epoch is already declared there — the one-way door
+  that previously bricked the collector on restart can no longer be walked through by accident.
+- Bounded the evidence caches without weakening any verification or dedup guarantee: the
+  collector's event index retains hashes rather than whole events beyond a configurable window,
+  `PolicyEngine` accepts `max_retained_generations` (default unlimited) with dropped generations
+  still producing explicit unknown-provenance failures, and the escalation store and execution
+  journal gain operator-invoked `prune_terminal` that deletes only terminal records older than a
+  cutoff.
+- The wheel-contents test now asserts every runtime subpackage ships, and the CrewAI `_resource`
+  rejection guard is tested on the sync bridge that native `BaseTool.run()` delegates to.
+
 ### Added (governed runtime)
 
 - Added canonical `agentguard.testing` synthetic benchmark helpers. Statistical records now use

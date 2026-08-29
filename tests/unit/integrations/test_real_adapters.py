@@ -379,6 +379,27 @@ def test_crewai_extra_exposes_native_base_tool(
     assert governed.run("applicant") == {"score": 720}
 
 
+async def test_crewai_sync_run_rejects_resource_kwarg(
+    _runtime: tuple[str, AgentRegistry, RBACEngine, AppendOnlyAuditLog],
+) -> None:
+    """The sync bridge must hit the same ``_resource`` guard as ``arun``.
+
+    ``_run`` is exactly what CrewAI's inherited native ``BaseTool.run()``
+    delegates to, so this covers the native path without depending on how a
+    given CrewAI release wraps exceptions.
+    """
+    tool = _CrewTool()
+    governed = GovernedCrewAITool(
+        tool=tool,
+        resource="public/data",
+        **_legacy_identity(_runtime),
+    )
+
+    with pytest.raises(TypeError, match="_resource"):
+        governed._run("applicant", _resource="admin/secrets")
+    tool._run.assert_not_called()
+
+
 @pytest.mark.skipif(
     not _has_module("google.adk"),
     reason="requires agentguard[adk]",

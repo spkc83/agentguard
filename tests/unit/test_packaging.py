@@ -174,3 +174,16 @@ def test_wheel_ships_license_types_and_policies(tmp_path: Path) -> None:
     for bundle in ("owasp_agentic", "finos_aigf_v2", "eu_ai_act"):
         assert f"agentguard/compliance/policies/{bundle}.yaml" in names
     assert any(n.endswith("/licenses/LICENSE") for n in names), sorted(names)
+    # Every runtime subpackage must ship — a hatchling include regression
+    # would otherwise surface only as ImportError in a consumer install.
+    for module in (
+        "agentguard/guardrails/kernel.py",
+        "agentguard/guardrails/chain.py",
+        "agentguard/guardrails/content.py",
+        "agentguard/testing/synthetic.py",
+        "agentguard/core/audit_collector.py",
+        "agentguard/core/jwt_authentication.py",
+        "agentguard/compliance/execution_journal.py",
+        "agentguard/domains/finance/credit_risk/reason_codes.py",
+    ):
+        assert module in names, f"wheel is missing {module}"

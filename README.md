@@ -216,6 +216,10 @@ Your Agent Application (LangGraph / CrewAI / ADK / Python)
 # Audit log operations
 agentguard audit show --log-dir ./audit-logs
 agentguard audit verify --log-dir ./audit-logs
+agentguard audit verify --log-dir ./audit-logs \
+  --trusted-checkpoint ./offhost/audit-head.json  # Also detect a rolled-back log
+agentguard audit export-checkpoint --audit-dir ./audit-logs \
+  --output ./offhost/audit-head.json            # Signed head to replicate off-host
 agentguard audit replay --log-dir ./audit-logs
 
 # Policy management
@@ -236,9 +240,13 @@ agentguard observe summary   --log-dir ./audit-logs  # Quick counts by result/ag
 ```
 
 `audit-head.json` inside the log directory proves local consistency but shares the log's rollback
-boundary. Store the checkpoint returned by `AppendOnlyAuditLog.export_checkpoint()` outside that
-directory and pass it with `--trusted-checkpoint`; unanchored evidence remains inspectable but is
-refused as a clean compliance attestation.
+boundary. Export the signed head with `agentguard audit export-checkpoint` and replicate it to
+storage the audit host cannot write; passing it back with `--trusted-checkpoint` makes a log that
+no longer reaches that head fail as `ROLLBACK DETECTED`, and unanchored evidence remains
+inspectable but is refused as a clean compliance attestation. Export refuses to overwrite a
+witness that already commits to a higher head, so the witness itself cannot be rolled back
+quietly. A same-host copy of the witness proves nothing, and the window between exports is
+undetectable — export frequency sets how much history a rollback could silently discard.
 
 ### Out-of-process audit collector
 
@@ -262,6 +270,8 @@ collector = AuditCollectorServer(
     socket_path=Path("/run/agentguard/audit.sock"),
     audit_log=local_log,
     state_path=Path("/var/lib/agentguard-anchor/state.json"),
+    # Must resolve outside both directories above; replicate it off-host.
+    trusted_checkpoint_path=Path("/var/lib/agentguard-witness/audit-head.json"),
 )
 await collector.start()
 
@@ -274,11 +284,38 @@ epoch/fingerprint commitment, and uses bounded framed requests and immutable pag
 It fails closed when unavailable or malformed. A prepared checkpoint makes a crash before append
 discardable and a crash after event `fsync` recoverable without creating a fork.
 
+With `trusted_checkpoint_path` set, the collector refuses to start when its local head is behind
+that witness and rewrites the witness after every committed checkpoint, so replicating the file
+off-host is all that stands between you and rollback detection.
+
 This boundary protects the key and ordering only when the collector and external state are in
 separate failure domains from the agent and log. It does not prove event semantics, resist a
-same-UID attacker that can replace both domains, or provide third-party verification of the HMAC.
-The UDS directory is owner-only, peers are UID-checked, and one lifetime lock prevents two
-collectors from owning the same log directory.
+same-UID attacker that can replace both domains and roll back to a point newer than the last
+off-host witness, or provide third-party verification of the HMAC. The UDS directory is
+owner-only, peers are UID-checked, and one lifetime lock prevents two collectors from owning the
+same log directory.
+
+#### Rotating the audit signing key
+
+Key bytes live only in the environment, so an epoch the environment does not declare cannot be
+rebuilt after a restart. Declare the next epoch first, then activate it:
+
+```bash
+export AGENTGUARD_AUDIT_KEY=$(python -c "import secrets; print(secrets.token_hex(32))")
+# Declare epoch 2 before rotating; activation_sequence is where it takes effect.
+export AGENTGUARD_AUDIT_KEYS='{"epoch-2": {"key": "<32+ byte key>", "activation_sequence": 900}}'
+```
+
+`AuditCollectorServer.rotate_key` refuses an epoch that `AGENTGUARD_AUDIT_KEYS` does not declare,
+so the one-way door — post-rotation events that no restart can verify — cannot be opened by
+accident. Keep every past epoch in the variable for as long as you need to verify events signed
+under it.
+
+Adding an epoch to a collector that is already running against committed state requires
+`AuditCollectorServer(..., adopt_declared_epochs=True)` for that start: the declaration is not
+signed by anything, so committing it is a deliberate operator action rather than a side effect of
+a restart. Protect `AGENTGUARD_AUDIT_KEYS` exactly as you protect `AGENTGUARD_AUDIT_KEY` —
+whoever can write it can introduce a signing epoch.
 
 ## Roadmap
 

@@ -266,6 +266,54 @@ mode separates signing-key custody and ordering from the agent process. Symmetri
 still does not prove event truth or provide public third-party verification, and a
 same-UID compromise of both failure domains remains outside the collector boundary.
 
+#### Rollback witness trust boundary
+
+`audit-head.json` lives inside the audit directory, and `AuditCollectorServer`'s signed
+state lives beside it on the same host. An attacker with root can restore both together,
+so neither proves the log was not rewound. The only artifact that can prove it is a
+**checkpoint replicated off-host**: `agentguard audit export-checkpoint` writes the signed
+head, and `agentguard audit verify --trusted-checkpoint` (or
+`AppendOnlyAuditLog(trusted_checkpoint=...)`) refuses a log that no longer reaches it,
+raising `AuditRollbackDetectedError`. A collector configured with
+`trusted_checkpoint_path=` — which must resolve outside both the audit and collector-state
+directories — refuses to start behind that witness and advances it after every committed
+checkpoint, so replicating the file off-host is a file-copy problem rather than a code one.
+
+What this detects: in-place edits and reordering (HMAC chain), tail truncation
+(sequence + local checkpoint), and a rollback to any head older than the last exported
+witness, including one that restores the audit directory and collector state together.
+
+What it does **not** detect: a rollback to a state *newer* than the last witness that
+reached off-host storage — the window between exports is unwitnessed; a same-host copy of
+the witness, which shares the attacker's reach and proves nothing; forged event content
+signed with a compromised key; and event truth, since HMAC binds who wrote a record, not
+whether the record describes reality. Export frequency sets the size of the undetectable
+window, and the witness must be replicated to storage the audit host cannot write.
+
+#### Signing-key epoch continuity
+
+`AGENTGUARD_AUDIT_KEY` supplies epoch 1. `AGENTGUARD_AUDIT_KEYS` optionally declares later
+epochs as a JSON object mapping `key_id` to `{"key": ..., "activation_sequence": ...}`,
+subject to the same >=32-byte floor. This declaration is what makes rotation survivable:
+key bytes exist only in the environment, so an epoch the environment does not declare
+cannot be rebuilt after a restart and every event signed under it becomes unverifiable.
+`AuditCollectorServer.rotate_key` therefore refuses to activate an undeclared epoch on an
+environment-sourced keyring (`AuditKeyRotationRefusedError`) rather than opening that
+one-way door; a caller-injected keyring owns its own continuity and still rotates in place.
+
+The declaration is **unauthenticated** — an epoch is trusted because it appears in the
+environment, not because anything signed it. Write access to the process environment is
+therefore equivalent to audit-key custody: whoever can set `AGENTGUARD_AUDIT_KEYS` can
+introduce a signing epoch and forge events that verify under it. This is not a new
+boundary (`AGENTGUARD_AUDIT_KEY` is read from the same place), but it does mean the
+variable must be protected exactly as the key is. To keep an environment edit from
+silently becoming durable, a restart that sees newly declared epochs refuses to start
+unless the operator passes `adopt_declared_epochs=True`; adoption then commits them into
+signed state only as a strict suffix extension whose activations fall after the committed
+head, so no already-signed event can be reinterpreted. Binding declarations to the
+predecessor epoch with an activation certificate would close the trust gap and remains
+open.
+
 New writes use schema v8. Its domain-separated canonical envelope signs typed
 `RegistryMutationEvidence` in addition to the v4 guardrail, v5 HITL, v6 reconciliation, and v7
 authentication extensions. Authorized registry evidence binds the authenticated administrator,
@@ -539,6 +587,30 @@ delivered decline without a later, timely, exactly linked delivered notice as
 The current governed notice-recording slice accepts final decline candidates paired with a
 `DeniedApplicationNotice` or `CounterofferNonAcceptanceNotice`. Phase 4.3's other artifact types
 remain constructible/renderable but are not accepted by this recording boundary.
+
+### Non-Model Principal Reasons
+
+Regulation B requires a notice to state the decline's actual principal reasons, and not every
+decline is a model decline. A candidate can therefore carry two further reason bases, each bound to
+this application and decision so it cannot be lifted from another file:
+
+- A `PolicyDenialSelection` is produced only by evaluating a versioned `CreditPolicyBundle` over the
+  complete declared fact schema. It carries the facts it was computed from, so
+  `PolicyReasonIntegrityGuardrail` — holding the same bundle — recomputes every finding and denies
+  `AA.POLICY_REASON_UNBOUND` on any drift, including a denial that omits a rule which also fired. A
+  bundle denial is a hard cutoff: it declines whatever band the PD falls in.
+- A `ReviewJudgment` records a reviewer's own codes, drawn from the same versioned ECOA registry,
+  against the escalation whose completed review lineage `verify_review_escalation` attests.
+  `ReviewReasonIntegrityGuardrail` admits it only on a `decision:override` decline naming that
+  application, decision, and taxonomy, and denies `AA.REVIEW_REASON_UNBOUND` otherwise; `override`
+  additionally refuses a judgment citing an escalation other than the one being reviewed.
+
+`PrincipalReasonSelection.from_decision_basis` composes a mixed notice in decision chronology —
+policy rules, then model reasons, then reviewer judgment — preserving each producer's own
+deterministic order within its basis and stating a code shared by two bases once, from the earlier
+one. A decline with no basis at all still fails closed, and the notice control accepts only the
+selection recomputed from the decision's own bases, so a human decline can never be signed by
+restating the model's reasons.
 
 **Roadmap — formal verification hook.** Model monotonicity and an adverse-action ordering proof
 are not implemented. Runtime reason and notice controls enforce concrete evidence contracts, but
@@ -866,7 +938,7 @@ when the application routes calls through an AgentGuard adapter or the kernel di
 | Threat | Vector | Intended mitigation | Status |
 |--------|--------|---------------------|--------|
 | Privilege escalation | Agent requests higher-permission tool | RBAC deny-override; no self-grant | **Mitigated on the adapter boundary** — trusted adapter resolvers derive and canonicalize action/resource; unresolved subjects deny before RBAC. Raw-tool bypass remains an application-boundary risk. |
-| Audit log tampering | Attacker modifies past events | HMAC chain; append-only storage | **Partial** — schema-v8 sequence/checkpoint verification detects edits, truncation, and signed guardrail/HITL/reconciliation/authentication/registry-evidence tampering with an external trusted head; collector mode separates keys and ordering, but same-UID dual-domain compromise and symmetric-key repudiation remain. |
+| Audit log tampering | Attacker modifies past events | HMAC chain; append-only storage | **Partial** — schema-v8 sequence/checkpoint verification detects edits, truncation, and signed guardrail/HITL/reconciliation/authentication/registry-evidence tampering with an external trusted head; `agentguard audit export-checkpoint` plus a collector `trusted_checkpoint_path` make that head operational, so a rollback of the audit directory and collector state together is detected against an off-host witness; collector mode separates keys and ordering, but a rollback newer than the last exported witness, same-UID dual-domain compromise, and symmetric-key repudiation remain. |
 | Prompt injection | User input → agent prompt → tool args | Content scanning policy (OWASP-AGENT-01) | **Partial** — pre-stage policy and input guardrails inspect the transformed payload and can deny/escalate known patterns; semantic attacks outside configured checks remain. |
 | Data exfiltration | Agent leaks PII via tool calls | PII detection; sandbox egress control | **Partial** — post-stage PII and secret guardrails can deny delivery of inspected results; configured sandbox obligations force hardened network-disabled execution, while host/raw-tool bypass remains an application-boundary risk. |
 | Sandbox escape | Tool escapes the container | Minimal base images; seccomp profiles; read-only FS | **Mitigated when a sandbox obligation is configured** — enforced PRE_TOOL obligations require the hardened Docker backend with read-only non-root execution, dropped capabilities, no-new-privileges, quotas, bounded logs, and no network; applications without the obligation remain unsandboxed. |
