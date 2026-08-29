@@ -7,7 +7,15 @@ from datetime import UTC, datetime
 
 import pytest
 
-from agentguard.domains.finance.credit_risk.agent_templates import CreditDecisionPolicy
+from agentguard.domains.finance.credit_risk.adverse_action import (
+    DecisionComponentOrigin,
+    PrincipalReasonSelection,
+)
+from agentguard.domains.finance.credit_risk.agent_templates import (
+    CreditDecisionCandidate,
+    CreditDecisionOutcome,
+    CreditDecisionPolicy,
+)
 from agentguard.domains.finance.credit_risk.attribution import (
     AdverseContribution,
     AttributionMethod,
@@ -34,6 +42,7 @@ from agentguard.guardrails import (
     GuardrailStage,
     IdentitySnapshot,
 )
+from tests.unit.domains.finance.test_decision_reasons import policy_denial, review_judgment
 from tests.unit.domains.finance.test_notice_renderer import _denial
 
 
@@ -243,3 +252,118 @@ def test_opaque_reference_is_domain_separated_and_namespace_allowlisted() -> Non
     assert decision.value != notice.value
     with pytest.raises(ValueError, match="namespace"):
         opaque_credit_ref("applicant", "SAME")
+
+
+def _judgment_candidate() -> CreditDecisionCandidate:
+    """A reviewed decline whose only principal reasons are the underwriter's."""
+
+    attribution, _ = _reason_evidence()
+    return CreditDecisionCandidate(
+        decision_id="DECISION-001",
+        application_ref="APP-001",
+        outcome=CreditDecisionOutcome.DECLINE,
+        pd_score=0.10,
+        policy_id="pd-bands",
+        policy_version="1",
+        model_id=attribution.model_id,
+        model_version=attribution.model_version,
+        attribution=attribution,
+        review_judgment=review_judgment(),
+    )
+
+
+def _policy_candidate() -> CreditDecisionCandidate:
+    """An application the PD band would approve, declined by a hard overlay rule."""
+
+    attribution, _ = _reason_evidence()
+    return CreditDecisionPolicy().evaluate(
+        decision_id="DECISION-001",
+        application_ref="APP-001",
+        pd_score=0.01,
+        model_id=attribution.model_id,
+        model_version=attribution.model_version,
+        attribution=attribution,
+        policy_denial=policy_denial(),
+    )
+
+
+def test_a_reviewed_decline_can_state_the_underwriters_own_reasons() -> None:
+    candidate = _judgment_candidate()
+    reasons = PrincipalReasonSelection.from_decision_basis(
+        review_judgment=candidate.review_judgment,
+    )
+
+    record = prepare_notice_record(
+        candidate,
+        _denial(reasons=reasons),
+        clock=lambda: datetime(2026, 8, 30, tzinfo=UTC),
+    )
+
+    origin = record.notice.principal_reasons.reasons[0].origin
+    assert isinstance(origin, DecisionComponentOrigin)
+    assert origin.component_kind == "human_review"
+    assert origin.binding.escalation_id == "ESCALATION-001"
+    assert record.evidence.artifact_type == "DeniedApplicationNotice"
+
+
+def test_a_policy_overlay_decline_states_the_rule_that_denied_it() -> None:
+    candidate = _policy_candidate()
+    reasons = PrincipalReasonSelection.from_decision_basis(
+        policy_denial=candidate.policy_denial,
+    )
+
+    record = prepare_notice_record(
+        candidate,
+        _denial(reasons=reasons),
+        clock=lambda: datetime(2026, 8, 30, tzinfo=UTC),
+    )
+
+    origin = record.notice.principal_reasons.reasons[0].origin
+    assert isinstance(origin, DecisionComponentOrigin)
+    assert origin.component_kind == "policy_rule"
+    assert origin.component_id == "POLICY-COLLATERAL-LTV"
+
+
+def test_a_judgmental_decline_cannot_be_signed_with_the_models_reasons() -> None:
+    with pytest.raises(AdverseActionError) as exc_info:
+        prepare_notice_record(
+            _judgment_candidate(),
+            _denial(),
+            clock=lambda: datetime(2026, 8, 30, tzinfo=UTC),
+        )
+
+    assert exc_info.value.failure is AdverseActionFailure.NOTICE_INCOMPLETE
+
+
+def test_a_model_decline_cannot_be_signed_with_borrowed_review_reasons() -> None:
+    reasons = PrincipalReasonSelection.from_decision_basis(review_judgment=review_judgment())
+
+    with pytest.raises(AdverseActionError) as exc_info:
+        prepare_notice_record(
+            _record().candidate,
+            _denial(reasons=reasons),
+            clock=lambda: datetime(2026, 8, 30, tzinfo=UTC),
+        )
+
+    assert exc_info.value.failure is AdverseActionFailure.NOTICE_INCOMPLETE
+
+
+def test_a_decline_with_no_basis_cannot_produce_a_notice() -> None:
+    attribution, _ = _reason_evidence()
+    candidate = CreditDecisionPolicy().evaluate(
+        decision_id="DECISION-001",
+        application_ref="APP-001",
+        pd_score=0.30,
+        model_id=attribution.model_id,
+        model_version=attribution.model_version,
+        attribution=attribution,
+    )
+
+    with pytest.raises(AdverseActionError) as exc_info:
+        prepare_notice_record(
+            candidate,
+            _denial(),
+            clock=lambda: datetime(2026, 8, 30, tzinfo=UTC),
+        )
+
+    assert exc_info.value.failure is AdverseActionFailure.NO_REASON_CODES

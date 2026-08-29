@@ -177,6 +177,7 @@ def _denial(
     *,
     scoring: bool = False,
     source: InformationSource | None = None,
+    reasons: PrincipalReasonSelection | None = None,
 ) -> DeniedApplicationNotice:
     return DeniedApplicationNotice(
         **_common(),
@@ -188,7 +189,7 @@ def _denial(
                 occurred_at=NOW + timedelta(days=2),
             ),
         ),
-        principal_reasons=_reasons(),
+        principal_reasons=reasons or _reasons(),
         ecoa_disclosure=_ecoa(),
         information_source=source or NoFCRA(),
         credit_scoring_applicable=scoring,

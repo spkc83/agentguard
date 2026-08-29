@@ -22,7 +22,11 @@ from agentguard.domains.finance.credit_risk.notice_governance import (
 from agentguard.exceptions import PermissionDeniedError
 from agentguard.guardrails import GuardrailPayload, ToolCallPayload
 from agentguard.models import AuditLink, EvidenceRef
-from tests.unit.domains.finance.test_notice_governance import _reason_evidence, _record
+from tests.unit.domains.finance.test_notice_governance import (
+    _judgment_candidate,
+    _reason_evidence,
+    _record,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
@@ -246,3 +250,20 @@ async def test_override_without_trusted_lineage_fails_inside_governed_executor()
         await agent.override(candidate=approve, parent_escalation_id="ESCALATION-001")
 
     assert kernel.calls[0]["action"] == "decision:override"
+
+
+@pytest.mark.asyncio
+async def test_judgmental_override_must_cite_the_escalation_it_is_reviewed_under() -> None:
+    kernel = _Kernel()
+    agent = GovernedCreditAgent(
+        kernel,
+        review_lineage_validator=_LineageValidator(),  # type: ignore[arg-type]
+    )
+
+    with pytest.raises(ValueError, match="escalation it is reviewed under"):
+        await agent.override(
+            candidate=_judgment_candidate(),
+            parent_escalation_id="ESCALATION-OTHER",
+        )
+
+    assert kernel.calls == []

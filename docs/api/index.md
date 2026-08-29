@@ -254,8 +254,20 @@ from agentguard.domains.finance.credit_risk import (
     AttributionIntegrityGuardrail,
     DecisionBandGuardrail,
     DecisionEvidenceGuardrail,
+    PolicyReasonIntegrityGuardrail,
     ProtectedAttributeGuardrail,
     ReasonCodeGuardrail,
+    ReviewReasonIntegrityGuardrail,
+)
+from agentguard.domains.finance.credit_risk import (
+    CreditPolicyBundle,
+    CreditPolicyRule,
+    JudgmentalReason,
+    PolicyComparison,
+    PolicyDenialSelection,
+    PolicyFact,
+    PolicyRuleFinding,
+    ReviewJudgment,
 )
 from agentguard.domains.finance.credit_risk import (
     ModelFairnessStatus,
@@ -321,6 +333,10 @@ from agentguard.domains.finance.credit_risk.adverse_action import (
     CounterofferNonAcceptanceNotice,
     WithdrawalRecord,
     PrincipalReasonSelection,
+    DecisionComponentOrigin,
+    HumanReviewBinding,
+    ModelReasonOrigin,
+    PolicyRuleBinding,
     ConsumerReportSource,
     NonCraThirdPartyDisclosure,
     AffiliateDisclosure,
@@ -365,7 +381,8 @@ from agentguard.testing.wgan_gp import StandardScaler, WganGpConfig, WganGpTrain
 | `pii` | Finance/FCRA/GLBA compatibility presets over the generic runtime PII detector and masker |
 | `credit_risk.agent_templates` | Pure versioned `CreditDecisionPolicy` and immutable approve/review/decline candidate contracts; deprecated legacy wrappers are not the public runtime |
 | `credit_risk.governed_agent` | Thin `GovernedCreditAgent` orchestration for fixed, independently authorizable score/decision/override/notice actions and allowlisted audit projections |
-| `credit_risk.decision_guardrails` | Action-scoped typed decision, protected-feature, review-band, reason-code, and attribution-integrity controls at `ON_DECISION` |
+| `credit_risk.decision_guardrails` | Action-scoped typed decision, protected-feature, review-band, reason-code, attribution-integrity, policy-reason-integrity, and review-reason-binding controls at `ON_DECISION` |
+| `credit_risk.decision_reasons` | Versioned hard credit-policy bundles recomputed from a declared fact schema, and reviewer judgments bound to a completed escalation; both supply non-model principal reasons that cannot be asserted as text |
 | `credit_risk.model_governance` | Domain-separated signed report envelope, exact-model revision source/verifier/provider, static provider, and fail-closed live provenance control |
 | `credit_risk.notice_governance` | Trusted prepared-notice validation and PII-free metadata for recording an already-completed written notification |
 | `credit_risk.review_governance` | Checkpoint-attested validation of exact delivered review lineage before a final override may reference its escalation |

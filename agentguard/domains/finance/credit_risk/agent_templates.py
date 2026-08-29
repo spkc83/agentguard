@@ -12,6 +12,10 @@ from agentguard.exceptions import AdverseActionFailure  # noqa: TC001 - Pydantic
 from agentguard.guardrails import DecisionPayload
 
 from .attribution import AttributionResult  # noqa: TC001 - Pydantic runtime type
+from .decision_reasons import (  # noqa: TC001 - Pydantic runtime type
+    PolicyDenialSelection,
+    ReviewJudgment,
+)
 from .reason_codes import ReasonCodeSelection  # noqa: TC001 - Pydantic runtime type
 
 
@@ -68,6 +72,11 @@ class CreditDecisionCandidate(BaseModel):
     A decline may intentionally lack reason evidence or carry a typed mapping
     failure. That lets the ``ON_DECISION`` guardrail sign the exact fail-closed
     outcome instead of losing the decision before governance.
+
+    A decline may also rest on a credit-policy overlay denial or a completed
+    reviewer's judgment instead of, or alongside, model reasons. Both non-model
+    bases must name this exact application and decision, so neither can be
+    lifted from another file.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -82,6 +91,8 @@ class CreditDecisionCandidate(BaseModel):
     model_version: str
     attribution: AttributionResult | None = None
     reason_selection: ReasonCodeSelection | None = None
+    policy_denial: PolicyDenialSelection | None = None
+    review_judgment: ReviewJudgment | None = None
     reason_failure: AdverseActionFailure | None = None
 
     @field_validator(
@@ -109,8 +120,19 @@ class CreditDecisionCandidate(BaseModel):
 
     @model_validator(mode="after")
     def _validate_reason_state(self) -> CreditDecisionCandidate:
-        if self.reason_selection is not None and self.reason_failure is not None:
-            raise ValueError("reason selection and reason failure are mutually exclusive")
+        bases = (self.reason_selection, self.policy_denial, self.review_judgment)
+        if self.reason_failure is not None and any(basis is not None for basis in bases):
+            raise ValueError("a reason failure excludes every principal-reason basis")
+        for basis in (self.policy_denial, self.review_judgment):
+            if basis is None:
+                continue
+            if self.outcome is not CreditDecisionOutcome.DECLINE:
+                raise ValueError("policy and review reasons are legal only on a decline")
+            if (
+                basis.application_ref != self.application_ref
+                or basis.decision_id != self.decision_id
+            ):
+                raise ValueError("policy and review reasons must name this application decision")
         return self
 
     @property
@@ -150,12 +172,19 @@ class CreditDecisionPolicy:
         model_version: str,
         attribution: AttributionResult | None = None,
         reason_selection: ReasonCodeSelection | None = None,
+        policy_denial: PolicyDenialSelection | None = None,
         reason_failure: AdverseActionFailure | None = None,
     ) -> CreditDecisionCandidate:
-        """Classify one PD without fabricating reasons or inspecting raw features."""
+        """Classify one PD without fabricating reasons or inspecting raw features.
+
+        A recorded credit-policy overlay denial is a hard cutoff: it declines the
+        application whatever band the PD falls in.
+        """
 
         config = self._config
-        if pd_score < config.auto_approve_threshold:
+        if policy_denial is not None:
+            outcome = CreditDecisionOutcome.DECLINE
+        elif pd_score < config.auto_approve_threshold:
             outcome = CreditDecisionOutcome.APPROVE
         elif pd_score >= config.decline_threshold:
             outcome = CreditDecisionOutcome.DECLINE
@@ -172,5 +201,6 @@ class CreditDecisionPolicy:
             model_version=model_version,
             attribution=attribution,
             reason_selection=reason_selection,
+            policy_denial=policy_denial,
             reason_failure=reason_failure,
         )

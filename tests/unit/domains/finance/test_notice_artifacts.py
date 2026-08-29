@@ -31,7 +31,6 @@ from agentguard.domains.finance.credit_risk.adverse_action import (
     ModelReasonOrigin,
     NoFCRA,
     NonCraThirdPartyDisclosure,
-    PrincipalReason,
     PrincipalReasonSelection,
     StandaloneCounterofferNotice,
     StandaloneCounterofferTiming,
@@ -41,6 +40,10 @@ from agentguard.domains.finance.credit_risk.adverse_action import (
     WrittenNotificationEvent,
 )
 from agentguard.domains.finance.credit_risk.attribution import AttributionMethod
+from agentguard.domains.finance.credit_risk.decision_reasons import (
+    JudgmentalReason,
+    ReviewJudgment,
+)
 from agentguard.domains.finance.credit_risk.reason_codes import (
     BureauFactorCode,
     BureauFactorSelection,
@@ -50,6 +53,13 @@ from agentguard.domains.finance.credit_risk.reason_codes import (
     ReasonCodeSelection,
 )
 from agentguard.exceptions import AdverseActionError, AdverseActionFailure
+from tests.unit.domains.finance.test_decision_reasons import (
+    APPLICATION_REF,
+    DECISION_ID,
+    REVIEWED_AT,
+    policy_denial,
+    review_judgment,
+)
 
 NOW = datetime(2026, 8, 27, 15, 0, tzinfo=UTC)
 
@@ -198,25 +208,116 @@ def test_attribution_selection_converts_losslessly_to_model_reason_provenance() 
     assert reason.origin.adverse_contribution == pytest.approx(0.42)
 
 
-def test_non_model_reason_has_explicit_policy_or_human_origin() -> None:
-    code = _selection().reasons[0].code
-    selection = PrincipalReasonSelection(
-        taxonomy_version="2026.07",
-        reasons=(
-            PrincipalReason(
-                code=code,
-                rank=1,
-                origin=DecisionComponentOrigin(
-                    component_kind="policy_rule",
-                    component_id="CREDIT.MAX-DTI",
-                    component_version="2026.08",
-                ),
-            ),
-        ),
+def _policy_origin() -> DecisionComponentOrigin:
+    origin = (
+        PrincipalReasonSelection.from_decision_basis(
+            policy_denial=policy_denial(),
+        )
+        .reasons[0]
+        .origin
+    )
+    assert isinstance(origin, DecisionComponentOrigin)
+    return origin
+
+
+def test_non_model_reason_carries_the_recorded_component_that_produced_it() -> None:
+    origin = _policy_origin()
+
+    assert origin.component_kind == "policy_rule"
+    assert origin.component_id == "POLICY-COLLATERAL-LTV"
+    assert origin.component_version == "retail-overlay:2026.08"
+    assert origin.binding.kind == "policy_rule"
+    assert origin.binding.application_ref == APPLICATION_REF
+    assert origin.binding.decision_id == DECISION_ID
+
+
+def test_non_model_reason_cannot_be_asserted_without_a_binding() -> None:
+    with pytest.raises(ValidationError, match="binding"):
+        DecisionComponentOrigin.model_validate(
+            {
+                "component_kind": "policy_rule",
+                "component_id": "CREDIT.MAX-DTI",
+                "component_version": "2026.08",
+            }
+        )
+
+
+def test_non_model_reason_cannot_rename_the_component_it_binds_to() -> None:
+    payload = _policy_origin().model_dump()
+    payload["component_id"] = "POLICY-SOMETHING-ELSE"
+
+    with pytest.raises(ValidationError, match="restate its binding"):
+        DecisionComponentOrigin.model_validate(payload)
+
+
+def test_non_model_reason_cannot_relabel_a_policy_rule_as_human_judgment() -> None:
+    payload = _policy_origin().model_dump()
+    payload["component_kind"] = "human_review"
+
+    with pytest.raises(ValidationError, match="match its binding"):
+        DecisionComponentOrigin.model_validate(payload)
+
+
+def test_mixed_principal_reasons_follow_decision_chronology() -> None:
+    composed = PrincipalReasonSelection.from_decision_basis(
+        model_selection=_selection(),
+        policy_denial=policy_denial(),
+        review_judgment=review_judgment(),
     )
 
-    assert isinstance(selection.reasons[0].origin, DecisionComponentOrigin)
-    assert selection.reasons[0].origin.component_id == "CREDIT.MAX-DTI"
+    assert tuple(reason.code.code for reason in composed.reasons) == (
+        "AG-RB-C1-23",
+        "AG-RB-C1-09",
+        "AG-RB-C1-16",
+    )
+    assert tuple(reason.rank for reason in composed.reasons) == (1, 2, 3)
+    assert tuple(reason.origin.kind for reason in composed.reasons) == (
+        "decision_component",
+        "model",
+        "decision_component",
+    )
+    assert composed.reasons[2].origin.component_kind == "human_review"
+
+
+def test_a_code_shared_by_two_bases_is_stated_once_from_the_earlier_basis() -> None:
+    composed = PrincipalReasonSelection.from_decision_basis(
+        model_selection=_selection(),
+        review_judgment=review_judgment(codes=("AG-RB-C1-09",)),
+    )
+
+    assert len(composed.reasons) == 1
+    assert isinstance(composed.reasons[0].origin, ModelReasonOrigin)
+
+
+def test_composing_reasons_without_any_basis_fails_closed() -> None:
+    with pytest.raises(AdverseActionError) as exc_info:
+        PrincipalReasonSelection.from_decision_basis()
+
+    assert exc_info.value.failure is AdverseActionFailure.NO_REASON_CODES
+
+
+def test_composing_reasons_across_taxonomy_versions_fails_closed() -> None:
+    stale = credit_risk.ReasonCodeRegistry.with_appendix_c(
+        taxonomy_version="2025.01",
+        ecoa_feature_codes={},
+    )
+    drifted = ReviewJudgment(
+        taxonomy_version="2025.01",
+        application_ref=APPLICATION_REF,
+        decision_id=DECISION_ID,
+        escalation_id="ESCALATION-001",
+        reviewer_id="underwriter-7",
+        decided_at=REVIEWED_AT,
+        reasons=(JudgmentalReason(code=stale.ecoa_code("AG-RB-C1-16"), rank=1),),
+    )
+
+    with pytest.raises(AdverseActionError) as exc_info:
+        PrincipalReasonSelection.from_decision_basis(
+            model_selection=_selection(),
+            review_judgment=drifted,
+        )
+
+    assert exc_info.value.failure is AdverseActionFailure.TAXONOMY_MISMATCH
 
 
 def test_principal_reasons_reject_rank_or_taxonomy_drift() -> None:

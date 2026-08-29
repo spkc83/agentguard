@@ -416,6 +416,14 @@ class ReasonCodeRegistry:
 
         return tuple(sorted(self._ecoa_codes))
 
+    def ecoa_code(self, code_id: str) -> ReasonCode:
+        """Return the versioned reason code registered under ``code_id``."""
+
+        code = self._ecoa_codes.get(_canonical_code(code_id))
+        if code is None:
+            raise AdverseActionError(AdverseActionFailure.TAXONOMY_MISMATCH)
+        return code
+
     def ecoa_code_for_feature(self, feature_name: str) -> ReasonCode:
         feature = _canonical_text(feature_name, field_name="feature_name")
         code = self._ecoa_feature_codes.get(feature)

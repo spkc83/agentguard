@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import pytest
+from pydantic import ValidationError
 
 from agentguard.domains.finance.credit_risk.agent_templates import (
     CreditDecisionCandidate,
+    CreditDecisionOutcome,
     CreditDecisionPolicy,
 )
 from agentguard.domains.finance.credit_risk.attribution import (
@@ -17,9 +19,12 @@ from agentguard.domains.finance.credit_risk.decision_guardrails import (
     AttributionIntegrityGuardrail,
     DecisionBandGuardrail,
     DecisionEvidenceGuardrail,
+    PolicyReasonIntegrityGuardrail,
     ProtectedAttributeGuardrail,
     ReasonCodeGuardrail,
+    ReviewReasonIntegrityGuardrail,
 )
+from agentguard.domains.finance.credit_risk.decision_reasons import PolicyDenialSelection
 from agentguard.domains.finance.credit_risk.governed_agent import decision_audit_evidence
 from agentguard.domains.finance.credit_risk.reason_codes import (
     ReasonCode,
@@ -37,11 +42,21 @@ from agentguard.guardrails.reason_codes import (
     AA_ATTRIBUTION_MODEL_MISMATCH,
     AA_CODE_NOT_ATTRIBUTED,
     AA_NO_REASON_CODES,
+    AA_POLICY_REASON_UNBOUND,
+    AA_REVIEW_REASON_UNBOUND,
     AA_UNKNOWN_CODE,
     FAIR_PROTECTED_FEATURE_IN_INPUT,
     HITL_REVIEW_BAND,
     PII_UNSAFE_DECISION_EVIDENCE,
 )
+from tests.unit.domains.finance.test_decision_reasons import bundle, facts
+from tests.unit.domains.finance.test_decision_reasons import policy_denial as _overlay_denial
+from tests.unit.domains.finance.test_decision_reasons import registry as _overlay_registry
+from tests.unit.domains.finance.test_decision_reasons import review_judgment as _overlay_judgment
+
+_APPLICATION = "APPLICATION-001"
+_DECISION = "DECISION-001"
+_ESCALATION = "ESCALATION-001"
 
 
 def _registry() -> ReasonCodeRegistry:
@@ -293,3 +308,188 @@ async def test_valid_decline_reason_and_attribution_controls_allow() -> None:
 
     assert reason_outcome.effect is GuardrailEffect.ALLOW
     assert attribution_outcome.effect is GuardrailEffect.ALLOW
+
+
+def _denial(**kwargs: object) -> PolicyDenialSelection:
+    return _overlay_denial(
+        application_ref=_APPLICATION,
+        decision_id=_DECISION,
+        **kwargs,  # type: ignore[arg-type]
+    )
+
+
+def _policy_candidate(denial: PolicyDenialSelection | None = None) -> CreditDecisionCandidate:
+    """An application the PD band would approve, declined by a hard overlay rule."""
+
+    attribution = _attribution()
+    return CreditDecisionPolicy().evaluate(
+        decision_id=_DECISION,
+        application_ref=_APPLICATION,
+        pd_score=0.01,
+        model_id=attribution.model_id,
+        model_version=attribution.model_version,
+        attribution=attribution,
+        policy_denial=denial if denial is not None else _denial(),
+    )
+
+
+def _judgment_candidate(
+    *,
+    escalation_id: str = _ESCALATION,
+    codes: tuple[str, ...] = ("AG-RB-C1-16",),
+) -> CreditDecisionCandidate:
+    """A reviewed application the underwriter declined on their own judgment."""
+
+    attribution = _attribution()
+    return CreditDecisionCandidate(
+        decision_id=_DECISION,
+        application_ref=_APPLICATION,
+        outcome=CreditDecisionOutcome.DECLINE,
+        pd_score=0.10,
+        policy_id="pd-bands",
+        policy_version="1",
+        model_id=attribution.model_id,
+        model_version=attribution.model_version,
+        attribution=attribution,
+        review_judgment=_overlay_judgment(
+            application_ref=_APPLICATION,
+            decision_id=_DECISION,
+            escalation_id=escalation_id,
+            codes=codes,
+        ),
+    )
+
+
+def _override_context(candidate: CreditDecisionCandidate) -> GuardrailContext:
+    return _context(candidate).model_copy(update={"action": "decision:override"})
+
+
+@pytest.mark.asyncio
+async def test_policy_overlay_decline_passes_every_reason_control() -> None:
+    context = _context(_policy_candidate())
+    overlay = _overlay_registry()
+
+    outcomes = [
+        await PolicyReasonIntegrityGuardrail(bundle()).evaluate(context),
+        await ReasonCodeGuardrail(overlay).evaluate(context),
+        await AttributionIntegrityGuardrail(ReasonCodeMapper(overlay), overlay).evaluate(context),
+        await ReviewReasonIntegrityGuardrail(overlay).evaluate(context),
+    ]
+
+    assert all(outcome.effect is GuardrailEffect.ALLOW for outcome in outcomes)
+
+
+@pytest.mark.asyncio
+async def test_policy_reason_swapped_for_another_code_is_denied() -> None:
+    payload = _denial().model_dump()
+    payload["findings"][0]["code"] = _overlay_registry().ecoa_code("AG-RB-C1-01").model_dump()
+    candidate = _policy_candidate(PolicyDenialSelection.model_validate(payload))
+
+    outcome = await PolicyReasonIntegrityGuardrail(bundle()).evaluate(_context(candidate))
+
+    assert outcome.effect is GuardrailEffect.DENY
+    assert outcome.reason_codes == (AA_POLICY_REASON_UNBOUND,)
+
+
+@pytest.mark.asyncio
+async def test_policy_denial_omitting_a_rule_that_also_fired_is_denied() -> None:
+    complete = _denial(declared=facts(application_complete=0.0, collateral_ltv=0.97))
+    payload = complete.model_dump()
+    payload["findings"] = payload["findings"][:1]
+    candidate = _policy_candidate(PolicyDenialSelection.model_validate(payload))
+
+    outcome = await PolicyReasonIntegrityGuardrail(bundle()).evaluate(_context(candidate))
+
+    assert len(complete.findings) == 2
+    assert outcome.effect is GuardrailEffect.DENY
+    assert outcome.reason_codes == (AA_POLICY_REASON_UNBOUND,)
+
+
+@pytest.mark.asyncio
+async def test_policy_reason_from_an_unenforced_bundle_version_is_denied() -> None:
+    candidate = _policy_candidate(_denial(overlay=bundle(bundle_version="2026.09")))
+
+    outcome = await PolicyReasonIntegrityGuardrail(bundle()).evaluate(_context(candidate))
+
+    assert outcome.effect is GuardrailEffect.DENY
+    assert outcome.reason_codes == (AA_POLICY_REASON_UNBOUND,)
+
+
+def test_a_non_model_reason_from_another_application_cannot_be_attached() -> None:
+    with pytest.raises(ValidationError, match="name this application decision"):
+        CreditDecisionPolicy().evaluate(
+            decision_id=_DECISION,
+            application_ref=_APPLICATION,
+            pd_score=0.01,
+            model_id="pd-model",
+            model_version="1",
+            attribution=_attribution(),
+            policy_denial=_overlay_denial(application_ref="APPLICATION-OTHER"),
+        )
+
+
+@pytest.mark.asyncio
+async def test_reviewed_override_decline_passes_every_reason_control() -> None:
+    context = _override_context(_judgment_candidate())
+    overlay = _overlay_registry()
+
+    outcomes = [
+        await ReviewReasonIntegrityGuardrail(overlay).evaluate(context),
+        await ReasonCodeGuardrail(overlay).evaluate(context),
+        await AttributionIntegrityGuardrail(ReasonCodeMapper(overlay), overlay).evaluate(context),
+        await PolicyReasonIntegrityGuardrail(bundle()).evaluate(context),
+    ]
+
+    assert all(outcome.effect is GuardrailEffect.ALLOW for outcome in outcomes)
+
+
+@pytest.mark.asyncio
+async def test_judgmental_reason_without_a_reviewed_override_is_denied() -> None:
+    context = _context(_judgment_candidate())
+
+    outcome = await ReviewReasonIntegrityGuardrail(_overlay_registry()).evaluate(context)
+
+    assert context.action == "decision:decline"
+    assert outcome.effect is GuardrailEffect.DENY
+    assert outcome.reason_codes == (AA_REVIEW_REASON_UNBOUND,)
+
+
+@pytest.mark.asyncio
+async def test_judgmental_reason_outside_the_deployed_registry_is_denied() -> None:
+    narrow = ReasonCodeRegistry.with_appendix_c(
+        taxonomy_version="2026.07",
+        ecoa_feature_codes={"dti_ratio": "AG-RB-C1-09"},
+        additional_ecoa_codes=(),
+    )
+    trimmed = ReasonCodeRegistry(
+        taxonomy_version="2026.07",
+        ecoa_reason_codes=(narrow.ecoa_code("AG-RB-C1-09"),),
+        ecoa_feature_codes={"dti_ratio": "AG-RB-C1-09"},
+    )
+    context = _override_context(_judgment_candidate())
+
+    outcome = await ReviewReasonIntegrityGuardrail(trimmed).evaluate(context)
+
+    assert outcome.effect is GuardrailEffect.DENY
+    assert outcome.reason_codes == (AA_REVIEW_REASON_UNBOUND,)
+
+
+@pytest.mark.asyncio
+async def test_a_decline_with_no_basis_at_all_is_still_unattributed() -> None:
+    candidate = CreditDecisionPolicy().evaluate(
+        decision_id=_DECISION,
+        application_ref=_APPLICATION,
+        pd_score=0.30,
+        model_id="pd-model",
+        model_version="1",
+        attribution=_attribution(),
+    )
+    registry = _registry()
+
+    outcome = await AttributionIntegrityGuardrail(
+        ReasonCodeMapper(registry),
+        registry,
+    ).evaluate(_context(candidate))
+
+    assert outcome.effect is GuardrailEffect.DENY
+    assert outcome.reason_codes == (AA_CODE_NOT_ATTRIBUTED,)

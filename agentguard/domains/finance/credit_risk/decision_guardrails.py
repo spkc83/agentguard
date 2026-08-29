@@ -20,6 +20,8 @@ from agentguard.guardrails.reason_codes import (
     AA_ATTRIBUTION_MODEL_MISMATCH,
     AA_CODE_NOT_ATTRIBUTED,
     AA_NO_REASON_CODES,
+    AA_POLICY_REASON_UNBOUND,
+    AA_REVIEW_REASON_UNBOUND,
     AA_UNKNOWN_CODE,
     FAIR_PROTECTED_FEATURE_IN_INPUT,
     HITL_REVIEW_BAND,
@@ -27,9 +29,11 @@ from agentguard.guardrails.reason_codes import (
 )
 
 from .agent_templates import CreditDecisionCandidate, CreditDecisionOutcome
+from .decision_reasons import CreditPolicyBundle
 from .reason_codes import ReasonCodeMapper, ReasonCodeRegistry
 
 _ON_DECISION = frozenset({GuardrailStage.ON_DECISION})
+_OVERRIDE_ACTION = "decision:override"
 
 
 def _governs_credit_decision(context: GuardrailContext) -> bool:
@@ -153,8 +157,33 @@ class DecisionBandGuardrail:
         return GuardrailOutcome(effect=GuardrailEffect.ALLOW)
 
 
+def _declared_codes(candidate: CreditDecisionCandidate) -> tuple[tuple[str, str], ...]:
+    """Return every (code, taxonomy version) pair the decline actually cites."""
+
+    declared: list[tuple[str, str]] = []
+    if candidate.reason_selection is not None:
+        selection = candidate.reason_selection
+        declared.extend(
+            (reason.code.code, selection.taxonomy_version) for reason in selection.reasons
+        )
+    if candidate.policy_denial is not None:
+        denial = candidate.policy_denial
+        declared.extend((finding.code.code, denial.taxonomy_version) for finding in denial.findings)
+    if candidate.review_judgment is not None:
+        judgment = candidate.review_judgment
+        declared.extend(
+            (reason.code.code, judgment.taxonomy_version) for reason in judgment.reasons
+        )
+    return tuple(declared)
+
+
 class ReasonCodeGuardrail:
-    """Require known versioned ECOA principal reasons for every decline."""
+    """Require known versioned ECOA principal reasons for every decline.
+
+    A decline may cite model reasons, credit-policy overlay reasons, a completed
+    reviewer's own reasons, or a mix. Every cited code, whatever its basis, must
+    come from the same registered taxonomy.
+    """
 
     id = "credit-reason-codes"
     version = "1"
@@ -186,16 +215,15 @@ class ReasonCodeGuardrail:
                 effect=GuardrailEffect.DENY,
                 reason_codes=(candidate.reason_failure.value,),
             )
-        selection = candidate.reason_selection
-        if selection is None:
+        declared = _declared_codes(candidate)
+        if not declared:
             return GuardrailOutcome(
                 effect=GuardrailEffect.DENY,
                 reason_codes=(AA_NO_REASON_CODES,),
             )
-        code_ids = {reason.code.code for reason in selection.reasons}
-        if (
-            selection.taxonomy_version != self._taxonomy_version
-            or not code_ids <= self._known_codes
+        if any(
+            version != self._taxonomy_version or code not in self._known_codes
+            for code, version in declared
         ):
             return GuardrailOutcome(
                 effect=GuardrailEffect.DENY,
@@ -205,7 +233,12 @@ class ReasonCodeGuardrail:
 
 
 class AttributionIntegrityGuardrail:
-    """Recompute reason evidence and require an exact attribution match."""
+    """Recompute reason evidence and require an exact attribution match.
+
+    A decline that states no model reason is checked only when it has no other
+    basis: a decline resting on a policy-overlay denial or a completed review
+    cites those reasons instead, and each is verified by its own control.
+    """
 
     id = "credit-attribution-integrity"
     version = "1"
@@ -236,7 +269,17 @@ class AttributionIntegrityGuardrail:
             return GuardrailOutcome(effect=GuardrailEffect.ALLOW)
         attribution = candidate.attribution
         selection = candidate.reason_selection
-        if attribution is None or selection is None:
+        if selection is None:
+            non_model_basis = candidate.policy_denial is not None or (
+                candidate.review_judgment is not None
+            )
+            if non_model_basis:
+                return GuardrailOutcome(effect=GuardrailEffect.ALLOW)
+            return GuardrailOutcome(
+                effect=GuardrailEffect.DENY,
+                reason_codes=(AA_CODE_NOT_ATTRIBUTED,),
+            )
+        if attribution is None:
             return GuardrailOutcome(
                 effect=GuardrailEffect.DENY,
                 reason_codes=(AA_CODE_NOT_ATTRIBUTED,),
@@ -267,3 +310,117 @@ class AttributionIntegrityGuardrail:
                 reason_codes=(AA_CODE_NOT_ATTRIBUTED,),
             )
         return GuardrailOutcome(effect=GuardrailEffect.ALLOW)
+
+
+class PolicyReasonIntegrityGuardrail:
+    """Recompute a claimed credit-policy denial from its own recorded facts.
+
+    The control holds the versioned bundle itself, so a policy principal reason
+    survives only when re-evaluating that bundle over the facts recorded for
+    this application and decision produces exactly the claimed denial.
+    """
+
+    id = "credit-policy-reason-integrity"
+    version = "1"
+    resume_fingerprint = (
+        "agentguard.domains.finance.credit_risk.decision_guardrails:"
+        "PolicyReasonIntegrityGuardrail:1"
+    )
+    stages = _ON_DECISION
+
+    def __init__(self, bundle: CreditPolicyBundle) -> None:
+        if not isinstance(bundle, CreditPolicyBundle):
+            raise TypeError("bundle must be a CreditPolicyBundle")
+        self._bundle = bundle
+        self.config = {
+            "bundle_id": bundle.bundle_id,
+            "bundle_version": bundle.bundle_version,
+            "taxonomy_version": bundle.taxonomy_version,
+            "rule_ids": bundle.rule_ids,
+            "fact_names": bundle.fact_names,
+        }
+
+    async def evaluate(self, context: GuardrailContext) -> GuardrailOutcome:
+        if not _governs_credit_decision(context):
+            return GuardrailOutcome(effect=GuardrailEffect.ALLOW)
+        candidate = parse_credit_candidate(context)
+        if candidate is None:
+            return _invalid_payload()
+        denial = candidate.policy_denial
+        if denial is None:
+            return GuardrailOutcome(effect=GuardrailEffect.ALLOW)
+        if (
+            candidate.outcome is not CreditDecisionOutcome.DECLINE
+            or denial.bundle_id != self._bundle.bundle_id
+            or denial.bundle_version != self._bundle.bundle_version
+        ):
+            return _unbound_policy_reason()
+        try:
+            recomputed = self._bundle.evaluate(
+                application_ref=candidate.application_ref,
+                decision_id=candidate.decision_id,
+                facts=denial.facts,
+            )
+        except (AdverseActionError, TypeError, ValueError):
+            return _unbound_policy_reason()
+        if recomputed != denial:
+            return _unbound_policy_reason()
+        return GuardrailOutcome(effect=GuardrailEffect.ALLOW)
+
+
+class ReviewReasonIntegrityGuardrail:
+    """Admit a reviewer's own principal reasons only on a reviewed override.
+
+    A judgmental reason cannot be recomputed, so it is bound instead: it is
+    legal only on a ``decision:override`` decline that names this application,
+    decision, and the escalation whose completed review lineage the override
+    executor verifies before emission.
+    """
+
+    id = "credit-review-reason-integrity"
+    version = "1"
+    resume_fingerprint = (
+        "agentguard.domains.finance.credit_risk.decision_guardrails:"
+        "ReviewReasonIntegrityGuardrail:1"
+    )
+    stages = _ON_DECISION
+
+    def __init__(self, registry: ReasonCodeRegistry) -> None:
+        if not isinstance(registry, ReasonCodeRegistry):
+            raise TypeError("registry must be a ReasonCodeRegistry")
+        self._taxonomy_version = registry.taxonomy_version
+        self._known_codes = frozenset(registry.ecoa_code_ids)
+        self.config = {
+            "taxonomy_version": self._taxonomy_version,
+            "known_codes": tuple(sorted(self._known_codes)),
+        }
+
+    async def evaluate(self, context: GuardrailContext) -> GuardrailOutcome:
+        if not _governs_credit_decision(context):
+            return GuardrailOutcome(effect=GuardrailEffect.ALLOW)
+        candidate = parse_credit_candidate(context)
+        if candidate is None:
+            return _invalid_payload()
+        judgment = candidate.review_judgment
+        if judgment is None:
+            return GuardrailOutcome(effect=GuardrailEffect.ALLOW)
+        if (
+            context.action != _OVERRIDE_ACTION
+            or candidate.outcome is not CreditDecisionOutcome.DECLINE
+            or judgment.application_ref != candidate.application_ref
+            or judgment.decision_id != candidate.decision_id
+            or judgment.taxonomy_version != self._taxonomy_version
+            or any(reason.code.code not in self._known_codes for reason in judgment.reasons)
+        ):
+            return GuardrailOutcome(
+                effect=GuardrailEffect.DENY,
+                reason_codes=(AA_REVIEW_REASON_UNBOUND,),
+            )
+        return GuardrailOutcome(effect=GuardrailEffect.ALLOW)
+
+
+def _unbound_policy_reason() -> GuardrailOutcome:
+    return GuardrailOutcome(
+        effect=GuardrailEffect.DENY,
+        reason_codes=(AA_POLICY_REASON_UNBOUND,),
+    )

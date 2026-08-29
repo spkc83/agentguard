@@ -205,17 +205,25 @@ def prepare_notice_record(
     renderer: NoticeRenderer | None = None,
     clock: Callable[[], datetime] = _utc_now,
 ) -> PreparedNoticeRecord:
-    """Revalidate a decline notice locally and derive only PII-free evidence."""
+    """Revalidate a decline notice locally and derive only PII-free evidence.
 
-    selection = candidate.reason_selection
+    The notice must state exactly the principal reasons composed from the
+    decline's own bases — model attribution, a recorded credit-policy denial, a
+    completed reviewer's judgment, or a mix of them — so a signed notice can
+    never restate reasons the decision did not rest on.
+    """
+
     if (
         candidate.outcome is not CreditDecisionOutcome.DECLINE
-        or selection is None
         or not isinstance(notice, DeniedApplicationNotice | CounterofferNonAcceptanceNotice)
         or notice.credit_request.application_id != candidate.application_ref
     ):
         _fail(AdverseActionFailure.NOTICE_INCOMPLETE)
-    expected_reasons = PrincipalReasonSelection.from_attribution(selection)
+    expected_reasons = PrincipalReasonSelection.from_decision_basis(
+        model_selection=candidate.reason_selection,
+        policy_denial=candidate.policy_denial,
+        review_judgment=candidate.review_judgment,
+    )
     if notice.principal_reasons != expected_reasons:
         _fail(AdverseActionFailure.NOTICE_INCOMPLETE)
 

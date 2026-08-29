@@ -23,6 +23,11 @@ from pydantic import (
 from agentguard.domains.finance.credit_risk.attribution import (  # noqa: TC001
     AttributionMethod,
 )
+from agentguard.domains.finance.credit_risk.decision_reasons import (  # noqa: TC001
+    PolicyComparison,
+    PolicyDenialSelection,
+    ReviewJudgment,
+)
 from agentguard.domains.finance.credit_risk.reason_codes import (
     BureauFactorSelection,
     ReasonCode,
@@ -314,16 +319,109 @@ class ModelReasonOrigin(_RegulatoryModel):
         return self
 
 
+class PolicyRuleBinding(_RegulatoryModel):
+    """The recorded credit-policy denial that a policy reason restates."""
+
+    kind: Literal["policy_rule"] = "policy_rule"
+    application_ref: str
+    decision_id: str
+    bundle_id: str
+    bundle_version: str
+    rule_id: str
+    fact_name: str
+    comparison: PolicyComparison
+    threshold: float = Field(allow_inf_nan=False)
+    observed_value: float = Field(allow_inf_nan=False)
+    severity: int = Field(gt=0)
+
+    @field_validator(
+        "application_ref",
+        "decision_id",
+        "bundle_id",
+        "bundle_version",
+        "rule_id",
+        "fact_name",
+        mode="before",
+    )
+    @classmethod
+    def _validate_identifier(cls, value: object, info: object) -> str:
+        return _canonical_text(value, field_name=getattr(info, "field_name", "value"))
+
+    @model_validator(mode="after")
+    def _validate_trigger(self) -> PolicyRuleBinding:
+        if not self.comparison.holds(self.observed_value, self.threshold):
+            raise ValueError("a policy reason must cite a rule that actually denied")
+        return self
+
+
+class HumanReviewBinding(_RegulatoryModel):
+    """The completed human review that a judgmental reason restates."""
+
+    kind: Literal["human_review"] = "human_review"
+    application_ref: str
+    decision_id: str
+    escalation_id: str
+    reviewer_id: str
+    decided_at: datetime
+
+    @field_validator(
+        "application_ref",
+        "decision_id",
+        "escalation_id",
+        "reviewer_id",
+        mode="before",
+    )
+    @classmethod
+    def _validate_identifier(cls, value: object, info: object) -> str:
+        return _canonical_text(value, field_name=getattr(info, "field_name", "value"))
+
+    @field_validator("decided_at")
+    @classmethod
+    def _validate_decided_at(cls, value: datetime) -> datetime:
+        return _utc(value, field_name="decided_at")
+
+
+DecisionComponentBinding: TypeAlias = Annotated[
+    PolicyRuleBinding | HumanReviewBinding,
+    Field(discriminator="kind"),
+]
+
+
 class DecisionComponentOrigin(_RegulatoryModel):
+    """A principal reason produced by a policy rule or a human reviewer.
+
+    The origin is inert without its ``binding``: ``component_id`` and
+    ``component_version`` restate the bound component's identity (rule ID and
+    ``bundle_id:bundle_version`` for a policy rule; escalation ID and the review
+    decision instant for a human review) and are rejected when they disagree
+    with it. ``evidence_digest`` is derived from the recorded denial or review,
+    so it cannot be produced from a reason string alone.
+    """
+
     kind: Literal["decision_component"] = "decision_component"
     component_kind: Literal["policy_rule", "human_review"]
     component_id: str
     component_version: str
+    binding: DecisionComponentBinding
+    evidence_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
 
     @field_validator("component_id", "component_version", mode="before")
     @classmethod
     def _validate_identifier(cls, value: object, info: object) -> str:
         return _canonical_text(value, field_name=getattr(info, "field_name", "value"))
+
+    @model_validator(mode="after")
+    def _validate_binding(self) -> DecisionComponentOrigin:
+        binding = self.binding
+        if binding.kind != self.component_kind:
+            raise ValueError("component_kind must match its binding")
+        if isinstance(binding, PolicyRuleBinding):
+            expected = (binding.rule_id, f"{binding.bundle_id}:{binding.bundle_version}")
+        else:
+            expected = (binding.escalation_id, binding.decided_at.isoformat())
+        if (self.component_id, self.component_version) != expected:
+            raise ValueError("component identity must restate its binding")
+        return self
 
 
 ReasonOrigin: TypeAlias = Annotated[
@@ -338,7 +436,97 @@ class PrincipalReason(_RegulatoryModel):
     origin: ReasonOrigin
 
 
+def _model_reason_origins(
+    selection: ReasonCodeSelection | None,
+) -> list[tuple[ReasonCode, ReasonOrigin]]:
+    if selection is None:
+        return []
+    return [
+        (
+            mapped.code,
+            ModelReasonOrigin(
+                model_id=selection.model_id,
+                model_version=selection.model_version,
+                reference_id=selection.reference_id,
+                attribution_method=selection.attribution_method,
+                evaluated_feature_names=selection.feature_names,
+                source_features=mapped.source_features,
+                adverse_contribution=mapped.adverse_contribution,
+            ),
+        )
+        for mapped in selection.reasons
+    ]
+
+
+def _policy_reason_origins(
+    denial: PolicyDenialSelection | None,
+) -> list[tuple[ReasonCode, ReasonOrigin]]:
+    if denial is None:
+        return []
+    return [
+        (
+            finding.code,
+            DecisionComponentOrigin(
+                component_kind="policy_rule",
+                component_id=finding.rule_id,
+                component_version=f"{denial.bundle_id}:{denial.bundle_version}",
+                binding=PolicyRuleBinding(
+                    application_ref=denial.application_ref,
+                    decision_id=denial.decision_id,
+                    bundle_id=denial.bundle_id,
+                    bundle_version=denial.bundle_version,
+                    rule_id=finding.rule_id,
+                    fact_name=finding.fact_name,
+                    comparison=finding.comparison,
+                    threshold=finding.threshold,
+                    observed_value=finding.observed_value,
+                    severity=finding.severity,
+                ),
+                evidence_digest=denial.reason_digest(finding),
+            ),
+        )
+        for finding in denial.findings
+    ]
+
+
+def _judgment_reason_origins(
+    judgment: ReviewJudgment | None,
+) -> list[tuple[ReasonCode, ReasonOrigin]]:
+    if judgment is None:
+        return []
+    return [
+        (
+            reason.code,
+            DecisionComponentOrigin(
+                component_kind="human_review",
+                component_id=judgment.escalation_id,
+                component_version=judgment.decided_at.isoformat(),
+                binding=HumanReviewBinding(
+                    application_ref=judgment.application_ref,
+                    decision_id=judgment.decision_id,
+                    escalation_id=judgment.escalation_id,
+                    reviewer_id=judgment.reviewer_id,
+                    decided_at=judgment.decided_at,
+                ),
+                evidence_digest=judgment.reason_digest(reason),
+            ),
+        )
+        for reason in judgment.reasons
+    ]
+
+
 class PrincipalReasonSelection(_RegulatoryModel):
+    """The ordered principal reasons a single adverse action notice states.
+
+    Reasons from different bases are ordered by decision chronology — the
+    credit-policy overlay denies before the model is consulted, and a human
+    reviewer decides last — so a mixed notice reads ``policy_rule``, then
+    ``model``, then ``human_review``. Within a basis the producing component's
+    own deterministic order is preserved: descending rule severity then rule ID
+    for policy findings, descending adverse contribution then code for model
+    reasons, and the reviewer's stated rank for judgmental reasons.
+    """
+
     taxonomy_version: str
     reasons: tuple[PrincipalReason, ...]
 
@@ -350,25 +538,53 @@ class PrincipalReasonSelection(_RegulatoryModel):
     def from_attribution(cls, selection: ReasonCodeSelection) -> PrincipalReasonSelection:
         if not isinstance(selection, ReasonCodeSelection):
             raise AdverseActionError(AdverseActionFailure.INVALID_ATTRIBUTION)
-        return cls(
-            taxonomy_version=selection.taxonomy_version,
-            reasons=tuple(
-                PrincipalReason(
-                    code=mapped.code,
-                    rank=mapped.rank,
-                    origin=ModelReasonOrigin(
-                        model_id=selection.model_id,
-                        model_version=selection.model_version,
-                        reference_id=selection.reference_id,
-                        attribution_method=selection.attribution_method,
-                        evaluated_feature_names=selection.feature_names,
-                        source_features=mapped.source_features,
-                        adverse_contribution=mapped.adverse_contribution,
-                    ),
-                )
-                for mapped in selection.reasons
-            ),
-        )
+        return cls.from_decision_basis(model_selection=selection)
+
+    @classmethod
+    def from_decision_basis(
+        cls,
+        *,
+        model_selection: ReasonCodeSelection | None = None,
+        policy_denial: PolicyDenialSelection | None = None,
+        review_judgment: ReviewJudgment | None = None,
+    ) -> PrincipalReasonSelection:
+        """Compose the principal reasons of one decline from its actual bases.
+
+        Args:
+            model_selection: Attribution-derived model reasons, if any.
+            policy_denial: The recorded credit-policy overlay denial, if any.
+            review_judgment: A completed reviewer's own reasons, if any.
+
+        Returns:
+            The deterministically ordered, deduplicated principal reasons.
+
+        Raises:
+            AdverseActionError: If no basis is supplied, or the supplied bases
+                disagree on the reason-code taxonomy version.
+        """
+
+        versions = {
+            source.taxonomy_version
+            for source in (model_selection, policy_denial, review_judgment)
+            if source is not None
+        }
+        if not versions:
+            raise AdverseActionError(AdverseActionFailure.NO_REASON_CODES)
+        if len(versions) != 1:
+            raise AdverseActionError(AdverseActionFailure.TAXONOMY_MISMATCH)
+        ordered: list[tuple[ReasonCode, ReasonOrigin]] = [
+            *_policy_reason_origins(policy_denial),
+            *_model_reason_origins(model_selection),
+            *_judgment_reason_origins(review_judgment),
+        ]
+        reasons: list[PrincipalReason] = []
+        seen: set[str] = set()
+        for code, origin in ordered:
+            if code.code in seen:
+                continue
+            seen.add(code.code)
+            reasons.append(PrincipalReason(code=code, rank=len(reasons) + 1, origin=origin))
+        return cls(taxonomy_version=versions.pop(), reasons=tuple(reasons))
 
     @model_validator(mode="after")
     def _validate_reasons(self) -> PrincipalReasonSelection:

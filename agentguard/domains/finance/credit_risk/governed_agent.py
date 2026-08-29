@@ -31,6 +31,7 @@ if TYPE_CHECKING:
     from datetime import datetime
 
     from .adverse_action import RenderableNotice
+    from .decision_reasons import PolicyDenialSelection
     from .reason_codes import ReasonCodeSelection
     from .review_governance import ReviewLineageValidator
 
@@ -219,10 +220,16 @@ class GovernedCreditAgent:
         application_ref: str,
         score: CreditModelScore,
         reason_selection: ReasonCodeSelection | None = None,
+        policy_denial: PolicyDenialSelection | None = None,
         agent_id: str | None = None,
         credential: object | None = None,
     ) -> CreditDecisionCandidate:
-        """Evaluate the pure policy and emit its result through the full kernel."""
+        """Evaluate the pure policy and emit its result through the full kernel.
+
+        A ``policy_denial`` produced by a versioned credit-policy bundle declines
+        the application regardless of the PD band, and its rules become the
+        notice's principal reasons.
+        """
 
         candidate = self._policy.evaluate(
             decision_id=decision_id,
@@ -232,6 +239,7 @@ class GovernedCreditAgent:
             model_version=score.attribution.model_version,
             attribution=score.attribution,
             reason_selection=reason_selection,
+            policy_denial=policy_denial,
         )
         return await self._emit_candidate(
             candidate,
@@ -248,11 +256,19 @@ class GovernedCreditAgent:
         agent_id: str | None = None,
         credential: object | None = None,
     ) -> CreditDecisionCandidate:
-        """Emit a separately authorized final underwriter outcome linked to review."""
+        """Emit a separately authorized final underwriter outcome linked to review.
+
+        When the override declines on the reviewer's own judgment, that judgment
+        must name the same escalation whose completed review lineage is verified
+        before the decision is emitted.
+        """
 
         if candidate.outcome is CreditDecisionOutcome.REVIEW:
             raise ValueError("an override must be a final approve or decline outcome")
         parent_escalation_id = _canonical_text(parent_escalation_id)
+        judgment = candidate.review_judgment
+        if judgment is not None and judgment.escalation_id != parent_escalation_id:
+            raise ValueError("a judgmental decline must cite the escalation it is reviewed under")
 
         async def validate_lineage() -> None:
             if self._review_lineage_validator is None:

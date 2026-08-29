@@ -18,6 +18,8 @@ from agentguard.domains.finance.credit_risk import (
     AttributionIntegrityGuardrail,
     AttributionMethod,
     AttributionResult,
+    CreditDecisionCandidate,
+    CreditDecisionOutcome,
     CreditDecisionPolicy,
     CreditModelScore,
     DecisionBandGuardrail,
@@ -30,12 +32,14 @@ from agentguard.domains.finance.credit_risk import (
     ModelValidationStatus,
     NoticeCompletenessGuardrail,
     NoticeRenderer,
+    PolicyReasonIntegrityGuardrail,
+    PrincipalReasonSelection,
     ProtectedAttributeGuardrail,
-    ReasonCode,
     ReasonCodeGuardrail,
     ReasonCodeMapper,
     ReasonCodeRegistry,
     ReviewEscalationVerifier,
+    ReviewReasonIntegrityGuardrail,
     StaticModelGovernanceEvidenceProvider,
     feature_schema_digest,
     find_unresolved_declines,
@@ -48,6 +52,11 @@ from agentguard.exceptions import (
 from agentguard.guardrails.kernel import GovernanceKernel
 from agentguard.guardrails.reason_codes import AA_NO_REASON_CODES, HITL_REVIEW_BAND
 from agentguard.models import EvidenceRef
+from tests.unit.domains.finance.test_decision_reasons import (
+    bundle,
+    policy_denial,
+    review_judgment,
+)
 from tests.unit.domains.finance.test_notice_renderer import _denial
 from tests.unit.guardrails.test_kernel_post_resume import (
     STORE_KEY,
@@ -79,16 +88,8 @@ class _CountingPolicy(CreditDecisionPolicy):
 
 
 def _reason_registry() -> ReasonCodeRegistry:
-    return ReasonCodeRegistry(
+    return ReasonCodeRegistry.with_appendix_c(
         taxonomy_version="2026.07",
-        ecoa_reason_codes=(
-            ReasonCode(
-                code="AG-RB-C1-09",
-                code_set_version="2026.07",
-                consumer_text=REASON_TEXT,
-                reg_b_ref="12 CFR pt. 1002, app. C, Form C-1",
-            ),
-        ),
         ecoa_feature_codes={"dti_ratio": "AG-RB-C1-09"},
     )
 
@@ -155,6 +156,8 @@ async def _kernel_and_agent(
         DecisionBandGuardrail(),
         ReasonCodeGuardrail(reason_registry),
         AttributionIntegrityGuardrail(ReasonCodeMapper(reason_registry), reason_registry),
+        PolicyReasonIntegrityGuardrail(bundle()),
+        ReviewReasonIntegrityGuardrail(reason_registry),
         NoticeCompletenessGuardrail(
             notice_provider,
             clock=lambda: NOW + timedelta(days=3),
@@ -454,3 +457,113 @@ async def test_decision_override_requires_permission_separate_from_approval(
         event.event_type == "delivery_completed" and event.action == "decision:override"
         for event in events
     )
+
+
+@pytest.mark.asyncio
+async def test_post_review_judgmental_decline_is_governed_and_resolved_by_its_notice(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AGENTGUARD_AUDIT_KEY", "credit-kernel-judgment-decline-p")
+    kernel, agent, audit, agent_id = await _kernel_and_agent(
+        tmp_path,
+        allowed_actions=("decision:review", "decision:override", "notice:issue"),
+    )
+    with pytest.raises(EscalationRequiredError) as caught:
+        await agent.decide(
+            decision_id="DECISION-REVIEW",
+            application_ref=APPLICATION_ID,
+            score=_score(0.10),
+            agent_id=agent_id,
+        )
+    escalation = caught.value
+    await kernel.decide_escalation(
+        escalation_id=escalation.escalation_id,
+        approval_token=escalation.approval_token,
+        credential=b"valid-credential",
+        decision_id="HITL-DECISION-JUDGMENT",
+        disposition=ApprovalDisposition.APPROVE,
+    )
+    await kernel.resume_tool_call(
+        escalation_id=escalation.escalation_id,
+        approval_token=escalation.approval_token,
+    )
+    judgment = review_judgment(
+        application_ref=APPLICATION_ID,
+        decision_id="DECISION-REVIEW",
+        escalation_id=escalation.escalation_id,
+    )
+    declined = CreditDecisionCandidate(
+        decision_id="DECISION-REVIEW",
+        application_ref=APPLICATION_ID,
+        outcome=CreditDecisionOutcome.DECLINE,
+        pd_score=0.10,
+        policy_id="pd-bands",
+        policy_version="1",
+        model_id=MODEL_ID,
+        model_version=MODEL_VERSION,
+        attribution=_attribution(),
+        review_judgment=judgment,
+    )
+
+    delivered = await agent.override(
+        candidate=declined,
+        parent_escalation_id=escalation.escalation_id,
+        agent_id=agent_id,
+    )
+    notice = _denial(reasons=PrincipalReasonSelection.from_decision_basis(review_judgment=judgment))
+    await agent.issue_notice(candidate=delivered, notice=notice, agent_id=agent_id)
+
+    assert delivered == declined
+    assert await find_unresolved_declines(audit) == ()
+    events = (await audit.read_verified(require_checkpoint=True)).events
+    override = next(
+        event
+        for event in events
+        if event.event_type == "delivery_completed" and event.action == "decision:override"
+    )
+    serialized = json.dumps(
+        [event.model_dump(mode="json") for event in events],
+        sort_keys=True,
+    )
+    assert override.result == "allowed"
+    assert "underwriter-7" not in serialized
+    assert "Poor credit performance with us" not in serialized
+
+
+@pytest.mark.asyncio
+async def test_hard_policy_decline_overrides_the_approve_band_and_states_its_rule(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AGENTGUARD_AUDIT_KEY", "credit-kernel-policy-decline-pad")
+    _, agent, audit, agent_id = await _kernel_and_agent(
+        tmp_path,
+        allowed_actions=("decision:decline", "notice:issue"),
+    )
+    denial = policy_denial(application_ref=APPLICATION_ID, decision_id=DECISION_ID)
+
+    candidate = await agent.decide(
+        decision_id=DECISION_ID,
+        application_ref=APPLICATION_ID,
+        score=_score(0.01),
+        policy_denial=denial,
+        agent_id=agent_id,
+    )
+    notice = _denial(reasons=PrincipalReasonSelection.from_decision_basis(policy_denial=denial))
+    await agent.issue_notice(candidate=candidate, notice=notice, agent_id=agent_id)
+
+    assert candidate.outcome is CreditDecisionOutcome.DECLINE
+    assert candidate.reason_selection is None
+    assert await find_unresolved_declines(audit) == ()
+    events = (await audit.read_verified(require_checkpoint=True)).events
+    assert any(
+        event.event_type == "delivery_completed" and event.action == "decision:decline"
+        for event in events
+    )
+    serialized = json.dumps(
+        [event.model_dump(mode="json") for event in events],
+        sort_keys=True,
+    )
+    assert "POLICY-COLLATERAL-LTV" not in serialized
+    assert "collateral_ltv" not in serialized
