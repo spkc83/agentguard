@@ -252,9 +252,16 @@ class PolicyEngine:
             ``check.type`` string to a callable taking ``(rule, event)``
             and returning a PolicyResult. Registered before any policy
             file is read, so custom types load like built-in ones.
+        max_retained_generations: How many non-active policy generations to
+            keep resolvable, or None (the default) to retain every generation
+            this instance has seen. The active generation is always retained.
+            Generations pinned by in-flight invocations are not tracked, so a
+            dropped generation makes :meth:`resolve_bundle` return None and any
+            report referencing it fails closed as unresolved provenance.
 
     Raises:
         PolicyLoadError: If a rule declares a check type with no handler.
+        ValueError: If a bound is not positive.
     """
 
     def __init__(
@@ -262,10 +269,14 @@ class PolicyEngine:
         policy_dirs: list[Path] | None = None,
         extra_check_handlers: Mapping[str, CheckHandler] | None = None,
         runtime_timeout_seconds: float = _DEFAULT_RUNTIME_TIMEOUT_SECONDS,
+        max_retained_generations: int | None = None,
     ) -> None:
         if not math.isfinite(runtime_timeout_seconds) or runtime_timeout_seconds <= 0:
             raise ValueError("runtime_timeout_seconds must be finite and greater than zero")
+        if max_retained_generations is not None and max_retained_generations < 1:
+            raise ValueError("max_retained_generations must be at least one when set")
         self._runtime_timeout_seconds = runtime_timeout_seconds
+        self._max_retained_generations = max_retained_generations
         self._policy_dirs = tuple(policy_dirs or [_DEFAULT_POLICIES_DIR])
         self._bundle_lock = threading.Lock()
         self._reload_lock = asyncio.Lock()
@@ -545,8 +556,30 @@ class PolicyEngine:
                 detail="snapshot version does not match canonical policy definitions",
             )
         with self._bundle_lock:
-            self._bundle_history[candidate.version] = candidate
+            self._retain_generation_locked(candidate, replace=True)
         return candidate
+
+    def _retain_generation_locked(self, bundle: PolicyBundle, *, replace: bool = False) -> None:
+        """Record a generation as the most recent, then apply the retention bound.
+
+        Dropping a generation is deliberate data loss: the engine never
+        substitutes the active bundle for a dropped one, so a later
+        :meth:`resolve_bundle` returns None and the caller must fail closed.
+        In-flight pinning is not tracked, so the bound must be set generously
+        enough to cover the longest invocation an operator expects.
+        """
+
+        limit = self._max_retained_generations
+        if replace or limit is not None:
+            # Reinsert so retention follows recency, not first appearance.
+            self._bundle_history.pop(bundle.version, None)
+        self._bundle_history.setdefault(bundle.version, bundle)
+        if limit is None:
+            return
+        active = self._current_bundle.version
+        droppable = [version for version in self._bundle_history if version != active]
+        for version in droppable[: max(len(droppable) - limit, 0)]:
+            del self._bundle_history[version]
 
     async def reload(self) -> PolicyReloadResult:
         """Build, validate, and atomically activate the configured policy files."""
@@ -555,9 +588,9 @@ class PolicyEngine:
             candidate = await asyncio.to_thread(self._build_bundle)
             with self._bundle_lock:
                 previous = self._current_bundle
-                self._bundle_history.setdefault(candidate.version, candidate)
                 if candidate.version != previous.version:
                     self._current_bundle = candidate
+                self._retain_generation_locked(candidate)
                 current = self._current_bundle
         logger.info(
             "policy_bundle_reloaded",

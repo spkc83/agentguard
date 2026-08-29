@@ -88,6 +88,17 @@ class ExecutionJournalStatus(StrEnum):
     HANDED_OFF = "handed_off"
 
 
+_TERMINAL_STATUSES = frozenset(
+    {
+        ExecutionJournalStatus.DELIVERED,
+        ExecutionJournalStatus.DELIVERY_DENIED,
+        ExecutionJournalStatus.HANDED_OFF,
+        ExecutionJournalStatus.RECONCILED_DENIED,
+    }
+)
+"""Resolved states; claimed, admitted, prepared, and in-doubt entries are live."""
+
+
 class InDoubtClassification(StrEnum):
     """Verified missing-boundary classification used for reconciliation."""
 
@@ -383,6 +394,37 @@ class ExecutionJournal:
         """Find the sole authenticated journal entry for an escalation ID."""
 
         return await asyncio.to_thread(self._find_sync, escalation_id)
+
+    async def prune_terminal(self, older_than: datetime) -> int:
+        """Delete terminal journal entries last touched before a cutoff.
+
+        Operator-invoked only; nothing prunes in the background. An entry is
+        removed only when it reached a resolved terminal state and every
+        timestamp it carries predates the cutoff. Claimed, admitted, prepared,
+        and in-doubt entries describe an unresolved execution window and are
+        never removed, regardless of age.
+
+        A pruned entry is absent, not tombstoned, and :meth:`create_claim`
+        recreates an absent entry as a fresh claim. Reconciliation for a pruned
+        invocation therefore reports ``CLAIMED`` rather than its true terminal
+        outcome. This cannot re-execute the work — the escalation store's
+        ``CLAIMED`` state is the one-time execution anchor and is never terminal,
+        so it is never pruned — but it does mean the cutoff must sit outside any
+        window in which reconciliation could still be asked about the entry.
+
+        Args:
+            older_than: Timezone-aware UTC cutoff; entries at or after it stay.
+
+        Returns:
+            The number of entries deleted.
+
+        Raises:
+            ValueError: If the cutoff is not timezone-aware.
+            ExecutionJournalTamperError: If an entry in the directory is
+                unauthentic.
+        """
+
+        return await asyncio.to_thread(self._prune_terminal_sync, older_than)
 
     async def mark_admitted(
         self, escalation_id: str, *, claim_id: str, invocation_id: str
@@ -772,6 +814,44 @@ class ExecutionJournal:
                 f"multiple journal entries exist for escalation {escalation_id}"
             )
         return matches[0].public()
+
+    def _prune_terminal_sync(self, older_than: datetime) -> int:
+        cutoff = _utc(older_than)
+        removed = 0
+        with self._locked():
+            try:
+                for path in sorted(self._directory.glob("*.json")):
+                    record = self._read_path(path)
+                    if record.status not in _TERMINAL_STATUSES:
+                        continue
+                    if self._last_touched(record) >= cutoff:
+                        continue
+                    path.unlink()
+                    removed += 1
+            finally:
+                # An unauthentic entry aborts the sweep; whatever was already
+                # unlinked still has to reach the disk.
+                if removed:
+                    directory_fd = os.open(self._directory, os.O_RDONLY)
+                    try:
+                        os.fsync(directory_fd)
+                    finally:
+                        os.close(directory_fd)
+        return removed
+
+    @staticmethod
+    def _last_touched(record: _StoredExecutionJournal) -> datetime:
+        """Latest timestamp the entry carries, so no live window is pruned early."""
+
+        candidates = (
+            record.created_at,
+            record.admitted_at,
+            record.execution_completed_at,
+            record.completion_audited_at,
+            record.in_doubt_at,
+            record.reconciled_at,
+        )
+        return max(value for value in candidates if value is not None)
 
     def _get_stored_sync(
         self, escalation_id: str, claim_id: str, invocation_id: str

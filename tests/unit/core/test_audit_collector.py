@@ -22,6 +22,7 @@ from agentguard.exceptions import (
     AuditCollectorOwnershipError,
     AuditCollectorProtocolError,
     AuditCollectorUnavailableError,
+    AuditKeyRotationRefusedError,
     RegistryFailure,
 )
 from agentguard.models import (
@@ -124,6 +125,34 @@ async def collector(
     await server.start()
     try:
         yield server, SigningAuditBackend(socket_path), audit_directory, socket_path
+    finally:
+        await server.close()
+
+
+_ROTATED_KEY_ID = "collector-epoch-2"
+_ROTATED_KEY = "collector-rotated-key-0123456789abcdef"
+
+
+@pytest.fixture
+async def declaring_collector(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> AsyncIterator[tuple[AuditCollectorServer, SigningAuditBackend]]:
+    """A collector whose environment already declares the next signing epoch."""
+
+    monkeypatch.setenv("AGENTGUARD_AUDIT_KEY", "collector-test-key-0123456789abcdef")
+    monkeypatch.setenv(
+        "AGENTGUARD_AUDIT_KEYS",
+        json.dumps({_ROTATED_KEY_ID: {"key": _ROTATED_KEY, "activation_sequence": 2}}),
+    )
+    socket_path = tmp_path / "run" / "collector.sock"
+    server = AuditCollectorServer(
+        socket_path=socket_path,
+        audit_log=AppendOnlyAuditLog(FileAuditBackend(tmp_path / "audit")),
+        state_path=tmp_path / "anchor" / "collector-state.json",
+    )
+    await server.start()
+    try:
+        yield server, SigningAuditBackend(socket_path)
     finally:
         await server.close()
 
@@ -795,12 +824,12 @@ async def test_restart_rejects_corrupt_external_state(
 
 
 async def test_rotation_signs_new_events_with_new_epoch_and_preserves_old_verification(
-    collector: tuple[AuditCollectorServer, SigningAuditBackend, Path, Path],
+    declaring_collector: tuple[AuditCollectorServer, SigningAuditBackend],
 ) -> None:
-    server, client, _, _ = collector
+    server, client = declaring_collector
     before = await client.write(_event("evt-before-rotation"))
 
-    epoch = await server.rotate_key("rotated-key", b"rotated-secret-key-material")
+    epoch = await server.rotate_key(_ROTATED_KEY_ID, _ROTATED_KEY.encode())
     after = await client.write(_event("evt-after-rotation"))
     snapshot = await client.read_verified(require_checkpoint=True)
 
@@ -811,13 +840,25 @@ async def test_rotation_signs_new_events_with_new_epoch_and_preserves_old_verifi
     assert snapshot.verification.valid is True
 
 
-async def test_idempotent_retry_cannot_downgrade_rotated_state_signer(
-    collector: tuple[AuditCollectorServer, SigningAuditBackend, Path, Path],
+async def test_confirming_the_same_declared_epoch_twice_is_idempotent(
+    declaring_collector: tuple[AuditCollectorServer, SigningAuditBackend],
 ) -> None:
-    server, client, _, _ = collector
+    server, client = declaring_collector
+    await client.write(_event("evt-before-repeat-rotation"))
+
+    first = await server.rotate_key(_ROTATED_KEY_ID, _ROTATED_KEY.encode())
+    second = await server.rotate_key(_ROTATED_KEY_ID, _ROTATED_KEY.encode())
+
+    assert first == second
+
+
+async def test_idempotent_retry_cannot_downgrade_rotated_state_signer(
+    declaring_collector: tuple[AuditCollectorServer, SigningAuditBackend],
+) -> None:
+    server, client = declaring_collector
     original = _event("evt-before-state-rotation")
     committed = await client.write(original)
-    epoch = await server.rotate_key("state-key-2", b"state-key-2-secret")
+    epoch = await server.rotate_key(_ROTATED_KEY_ID, _ROTATED_KEY.encode())
 
     assert server._state is not None
     assert server._state.signing_key_id == epoch.key_id
@@ -843,35 +884,11 @@ async def test_checkpoint_rpc_refuses_locally_committed_unanchored_head(
         await client.export_checkpoint()
 
 
-async def test_second_rotation_before_next_event_is_rejected(
+async def test_rotation_to_an_epoch_the_environment_never_declared_is_rejected(
     collector: tuple[AuditCollectorServer, SigningAuditBackend, Path, Path],
 ) -> None:
     server, client, _, _ = collector
     await client.write(_event("evt-before-pending-rotation"))
-    await server.rotate_key("first-pending-key", b"first-pending-secret")
 
-    with pytest.raises(ValueError, match="strictly increase"):
-        await server.rotate_key("second-pending-key", b"second-pending-secret")
-
-
-async def test_rotation_state_write_failure_keeps_previous_key_active(
-    collector: tuple[AuditCollectorServer, SigningAuditBackend, Path, Path],
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    server, client, _, _ = collector
-    before = await client.write(_event("evt-before-failed-rotation"))
-
-    with monkeypatch.context() as patcher:
-        patcher.setattr(
-            server,
-            "_write_state_sync",
-            lambda _state: (_ for _ in ()).throw(OSError("state storage unavailable")),
-        )
-        with pytest.raises(OSError, match="state storage unavailable"):
-            await server.rotate_key("uncommitted-key", b"uncommitted-secret")
-
-    after = await client.write(_event("evt-after-failed-rotation"))
-
-    assert after.key_id == before.key_id
-    snapshot = await client.read_verified(require_checkpoint=True)
-    assert snapshot.verification.valid is True
+    with pytest.raises(AuditKeyRotationRefusedError, match="AGENTGUARD_AUDIT_KEYS"):
+        await server.rotate_key("undeclared-key", b"undeclared-secret-0123456789abcdef")

@@ -193,6 +193,35 @@ class AuditKeyWeakError(AuditError):
         )
 
 
+class AuditKeyEnvironmentError(AuditError):
+    """Raised when AGENTGUARD_AUDIT_KEYS cannot be parsed into signing epochs.
+
+    The detail describes the structural problem only. Key material and any
+    prefix of it never reach this message.
+    """
+
+    def __init__(self, detail: str) -> None:
+        self.detail = detail
+        super().__init__(f"AGENTGUARD_AUDIT_KEYS is invalid: {detail}")
+
+
+class AuditKeyRotationRefusedError(AuditError):
+    """Raised when a rotation would leave the log unverifiable after a restart.
+
+    An environment-sourced keyring can only be rebuilt from the environment, so
+    an epoch that AGENTGUARD_AUDIT_KEYS does not declare would be lost on the
+    next start. The refusal names the epoch, never its key material.
+    """
+
+    def __init__(self, key_id: str) -> None:
+        self.key_id = key_id
+        super().__init__(
+            f"Audit key rotation to epoch {key_id!r} is refused: AGENTGUARD_AUDIT_KEYS must "
+            "declare this epoch (key and activation_sequence) before it can be activated, "
+            "otherwise a restart cannot verify events signed under it."
+        )
+
+
 class AuditKeyUnavailableError(AuditError):
     """Raised when an audit record references an unavailable verification key."""
 
@@ -229,10 +258,36 @@ class AuditCollectorOwnershipError(AuditError):
 class AuditTamperDetectedError(AuditError):
     """Raised when HMAC chain verification detects log tampering."""
 
-    def __init__(self, event_index: int, event_id: str) -> None:
+    def __init__(self, event_index: int, event_id: str, *, detail: str = "") -> None:
         self.event_index = event_index
         self.event_id = event_id
-        super().__init__(f"Audit log tamper detected at index={event_index} event_id={event_id}")
+        self.detail = detail
+        super().__init__(
+            detail or f"Audit log tamper detected at index={event_index} event_id={event_id}"
+        )
+
+
+class AuditRollbackDetectedError(AuditTamperDetectedError):
+    """Raised when the local chain head is behind a trusted external checkpoint.
+
+    This is the specific signal that the audit directory was rolled back to an
+    earlier state while an off-host witness survived. It subclasses
+    :class:`AuditTamperDetectedError` so existing fail-closed handlers keep
+    blocking, while operators can distinguish rollback from in-place edits.
+    """
+
+    def __init__(self, *, trusted_head_sequence: int, local_head_sequence: int) -> None:
+        self.trusted_head_sequence = trusted_head_sequence
+        self.local_head_sequence = local_head_sequence
+        super().__init__(
+            max(local_head_sequence - 1, 0),
+            "<trusted-checkpoint>",
+            detail=(
+                "Audit log rollback detected: local head sequence "
+                f"{local_head_sequence} is behind trusted checkpoint head "
+                f"{trusted_head_sequence}"
+            ),
+        )
 
 
 class AuditAttestationError(AuditError):

@@ -87,6 +87,18 @@ class EscalationStatus(StrEnum):
     HANDED_OFF = "handed_off"
 
 
+_TERMINAL_STATUSES = frozenset(
+    {
+        EscalationStatus.DENIED,
+        EscalationStatus.EXPIRED,
+        EscalationStatus.DELIVERED,
+        EscalationStatus.DELIVERY_DENIED,
+        EscalationStatus.HANDED_OFF,
+    }
+)
+"""States no further transition can leave; everything else is still in flight."""
+
+
 class ContinuationKind(StrEnum):
     """Execution boundary represented by an opaque continuation."""
 
@@ -393,6 +405,28 @@ class EscalationStore:
 
         return await asyncio.to_thread(self._list_sync)
 
+    async def prune_terminal(self, older_than: datetime) -> int:
+        """Delete terminal escalation records last touched before a cutoff.
+
+        Operator-invoked only; nothing prunes in the background. A record is
+        removed only when its durable state is terminal — a decided denial, a
+        committed expiry, or a committed delivery outcome — and every timestamp
+        it carries predates the cutoff. Pending, approved, prepared, and claimed
+        records are in flight and are never removed, regardless of age.
+
+        Args:
+            older_than: Timezone-aware UTC cutoff; records at or after it stay.
+
+        Returns:
+            The number of records deleted.
+
+        Raises:
+            ValueError: If the cutoff is not timezone-aware.
+            EscalationTamperError: If a record in the directory is unauthentic.
+        """
+
+        return await asyncio.to_thread(self._prune_terminal_sync, older_than)
+
     async def prepare_decision(
         self,
         escalation_id: str,
@@ -600,6 +634,50 @@ class EscalationStore:
                     record = self._expire_v1_if_due(record, current_time)
                 records.append(record.public())
         return tuple(sorted(records, key=lambda record: record.escalation_id))
+
+    def _prune_terminal_sync(self, older_than: datetime) -> int:
+        cutoff = _utc(older_than)
+        removed = 0
+        with self._locked():
+            try:
+                for path in sorted(self._directory.glob("*.json")):
+                    if path.is_symlink():
+                        raise EscalationTamperError(f"symlinked escalation record: {path.name}")
+                    record = self._read_path(path)
+                    if record.status not in _TERMINAL_STATUSES:
+                        continue
+                    if self._last_touched(record) >= cutoff:
+                        continue
+                    path.unlink()
+                    removed += 1
+            finally:
+                # An unauthentic record aborts the sweep; whatever was already
+                # unlinked still has to reach the disk.
+                if removed:
+                    directory_fd = os.open(self._directory, os.O_RDONLY)
+                    try:
+                        os.fsync(directory_fd)
+                    finally:
+                        os.close(directory_fd)
+        return removed
+
+    @staticmethod
+    def _last_touched(record: _StoredEscalation) -> datetime:
+        """Latest timestamp the signed record carries.
+
+        The schema stamps creation, expiry, decision, and claim times but not
+        delivery, so a record delivered long after it expired reports the expiry
+        as its last touch. Retention windows are therefore measured from the
+        approval lifecycle, not from delivery.
+        """
+
+        timestamps = [record.created_at, record.expires_at]
+        if isinstance(record, _StoredEscalationV2):
+            if record.decision is not None:
+                timestamps.append(record.decision.decided_at)
+            if record.claimed_at is not None:
+                timestamps.append(record.claimed_at)
+        return max(timestamps)
 
     def _expire_v1_if_due(self, record: _StoredEscalationV1, now: datetime) -> _StoredEscalationV1:
         if record.status is not EscalationStatus.PENDING:

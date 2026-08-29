@@ -6,6 +6,8 @@ Entry point: `agentguard` (configured in pyproject.toml).
 from __future__ import annotations
 
 import asyncio
+import os
+import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -106,23 +108,139 @@ def audit_show(
     asyncio.run(_show())
 
 
+def _write_witness(destination: Path, payload: str) -> None:
+    """Atomically write an owner-only checkpoint witness file."""
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_path = tempfile.mkstemp(
+        prefix=f".{destination.name}-", dir=destination.parent
+    )
+    try:
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary_path, destination)
+        temporary_path = ""
+        directory_fd = os.open(destination.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        if temporary_path and os.path.exists(temporary_path):
+            os.unlink(temporary_path)
+
+
+@audit_app.command("export-checkpoint")
+def audit_export_checkpoint(
+    audit_dir: Path = typer.Option(
+        "./audit-logs", "--audit-dir", "--log-dir", help="Audit log directory."
+    ),
+    output: Path = typer.Option(
+        None, help="Write the checkpoint here instead of stdout; never rolled backwards."
+    ),
+) -> None:
+    """Export the signed audit head for off-host rollback detection.
+
+    Replicate the exported file to a host that does not share the audit
+    directory's failure domain, then pass it back with
+    ``agentguard audit verify --trusted-checkpoint``.
+    """
+    from agentguard.core.audit import AppendOnlyAuditLog, AuditCheckpoint, FileAuditBackend
+    from agentguard.exceptions import AuditError
+
+    async def _export() -> None:
+        try:
+            log = AppendOnlyAuditLog(backend=FileAuditBackend(directory=audit_dir))
+            await log.verify_chain()
+            checkpoint = await log.export_checkpoint()
+        except (AuditError, OSError) as e:
+            console.print(f"[red]Checkpoint export refused:[/red] {e}")
+            raise typer.Exit(code=1) from None
+        if checkpoint is None:
+            console.print(
+                "[red]No signed audit head to export:[/red] the log is empty or predates "
+                "checkpointed schema v3."
+            )
+            raise typer.Exit(code=1)
+
+        payload = checkpoint.model_dump_json()
+        if output is None:
+            typer.echo(payload)
+            return
+        if output.exists():
+            try:
+                existing = AuditCheckpoint.model_validate_json(output.read_text(encoding="utf-8"))
+                # Authenticate the existing witness before letting it be replaced:
+                # an unsigned file must not be able to block or redirect exports.
+                log.verify_checkpoint_signature(existing)
+            except (AuditError, OSError, ValueError) as e:
+                console.print(f"[red]Existing checkpoint file is not authentic:[/red] {e}")
+                raise typer.Exit(code=1) from None
+            if existing.chain_id != checkpoint.chain_id:
+                console.print(
+                    "[red bold]WITNESS CHAIN MISMATCH[/red bold] — "
+                    f"{output} commits to chain {existing.chain_id}; this log is "
+                    f"chain {checkpoint.chain_id}. Refusing to rebind the witness."
+                )
+                raise typer.Exit(code=1)
+            if existing != checkpoint and existing.head_sequence >= checkpoint.head_sequence:
+                console.print(
+                    "[red bold]WITNESS ROLLBACK REFUSED[/red bold] — "
+                    f"{output} already commits to head sequence {existing.head_sequence}; "
+                    f"this log's head is {checkpoint.head_sequence}."
+                )
+                raise typer.Exit(code=1)
+        _write_witness(output, payload)
+        console.print(
+            f"[green]Checkpoint exported.[/green] head_sequence={checkpoint.head_sequence} "
+            f"-> {output}"
+        )
+
+    asyncio.run(_export())
+
+
 @audit_app.command("verify")
 def audit_verify(
     log_dir: Path = typer.Option("./audit-logs", help="Audit log directory."),
+    trusted_checkpoint: Path = typer.Option(
+        None,
+        help="Off-host checkpoint the log must still extend; detects a rolled-back log.",
+    ),
 ) -> None:
     """Verify audit log HMAC chain integrity."""
-    from agentguard.core.audit import AppendOnlyAuditLog, FileAuditBackend
-    from agentguard.exceptions import AuditTamperDetectedError
+    from agentguard.core.audit import AppendOnlyAuditLog, AuditCheckpoint, FileAuditBackend
+    from agentguard.exceptions import AuditRollbackDetectedError, AuditTamperDetectedError
 
     async def _verify() -> None:
         try:
-            log = AppendOnlyAuditLog(backend=FileAuditBackend(directory=log_dir))
+            anchor = (
+                AuditCheckpoint.model_validate_json(trusted_checkpoint.read_text(encoding="utf-8"))
+                if trusted_checkpoint is not None
+                else None
+            )
+        except (OSError, ValueError) as e:
+            console.print(f"[red]Trusted checkpoint unreadable:[/red] {e}")
+            raise typer.Exit(code=1) from None
+        try:
+            log = AppendOnlyAuditLog(
+                backend=FileAuditBackend(directory=log_dir),
+                trusted_checkpoint=anchor,
+            )
             result = await log.verify_chain()
             if result.valid:
                 console.print(
                     f"[green]Audit chain verified.[/green]"
                     f" {result.event_count} events, no tampering detected."
                 )
+        except AuditRollbackDetectedError as e:
+            console.print(
+                f"[red bold]ROLLBACK DETECTED[/red bold] — local head sequence "
+                f"{e.local_head_sequence} is behind trusted checkpoint head "
+                f"{e.trusted_head_sequence}."
+            )
+            raise typer.Exit(code=1) from None
         except AuditTamperDetectedError as e:
             console.print(
                 f"[red bold]TAMPER DETECTED[/red bold] at event index {e.event_index} "

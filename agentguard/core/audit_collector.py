@@ -18,6 +18,7 @@ from collections import OrderedDict
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
+import structlog
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from agentguard.core.audit import (
@@ -34,11 +35,15 @@ from agentguard.exceptions import (
     AuditCollectorProtocolError,
     AuditCollectorUnavailableError,
     AuditError,
+    AuditKeyRotationRefusedError,
+    AuditRollbackDetectedError,
 )
 from agentguard.models import AuditEvent
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+logger = structlog.get_logger()
 
 PROTOCOL_VERSION = 1
 DEFAULT_MAX_FRAME_BYTES = 1_048_576
@@ -98,6 +103,14 @@ class CollectorState(_StrictModel):
     signature: str = ""
 
 
+@dataclass(frozen=True, slots=True)
+class _IndexedEvent:
+    """Everything dedup needs about a committed event, without retaining it."""
+
+    sequence: int | None
+    fingerprint_digest: str
+
+
 @dataclass(frozen=True)
 class _Snapshot:
     events: tuple[AuditEvent, ...]
@@ -150,6 +163,12 @@ def _unsigned_event(event: AuditEvent) -> AuditEvent:
 
 def _event_fingerprint(event: AuditEvent) -> bytes:
     return _canonical_json(_unsigned_event(event))
+
+
+def _event_fingerprint_digest(event: AuditEvent) -> str:
+    """Constant-size stand-in for the unsigned content of a committed event."""
+
+    return hashlib.sha256(_event_fingerprint(event)).hexdigest()
 
 
 class SigningAuditBackend:
@@ -298,8 +317,10 @@ class AuditCollectorServer:
         socket_path: Path,
         audit_log: AppendOnlyAuditLog,
         state_path: Path,
+        trusted_checkpoint_path: Path | None = None,
         allowed_uids: set[int] | None = None,
         adopt_existing: bool = False,
+        adopt_declared_epochs: bool = False,
         request_timeout: float = 2.0,
         max_frame_bytes: int = DEFAULT_MAX_FRAME_BYTES,
         max_connections: int = 32,
@@ -311,15 +332,20 @@ class AuditCollectorServer:
         max_snapshots: int = 16,
         snapshot_ttl: float = 30.0,
         max_page_size: int = 512,
+        max_cached_events: int = 8192,
     ) -> None:
         if not isinstance(audit_log.backend, FileAuditBackend):
             raise TypeError("collector requires FileAuditBackend")
+        if max_cached_events < 1:
+            raise ValueError("max_cached_events must be at least 1")
         self._socket_path = socket_path
         self._audit_log = audit_log
         self._backend = audit_log.backend
         self._state_path = state_path
+        self._trusted_checkpoint_path = trusted_checkpoint_path
         self._allowed_uids = frozenset({os.getuid()} if allowed_uids is None else allowed_uids)
         self._adopt_existing = adopt_existing
+        self._adopt_declared_epochs = adopt_declared_epochs
         self._request_timeout = request_timeout
         self._operation_timeout = operation_timeout
         self._max_frame_bytes = max_frame_bytes
@@ -337,7 +363,13 @@ class AuditCollectorServer:
         self._max_page_size = max_page_size
         self._operation_lock = asyncio.Lock()
         self._snapshots: OrderedDict[str, _Snapshot] = OrderedDict()
-        self._event_index: dict[str, AuditEvent] = {}
+        self._max_cached_events = max_cached_events
+        # Dedup detection must stay complete for every event ever committed, so
+        # the index keeps only a digest per event. Whole events are cached
+        # separately and evicted, since they are needed solely to answer a
+        # duplicate append with the exact committed record.
+        self._event_index: dict[str, _IndexedEvent] = {}
+        self._recent_events: OrderedDict[str, AuditEvent] = OrderedDict()
         self._state: CollectorState | None = None
         self._server: asyncio.AbstractServer | None = None
         self._owner_file: Any = None
@@ -351,6 +383,22 @@ class AuditCollectorServer:
             pass
         else:
             raise ValueError("collector state must be stored outside the audit log directory")
+
+        if trusted_checkpoint_path is not None:
+            # A witness that shares a failure domain with the log or the state it
+            # is supposed to outlive proves nothing about a rollback of either.
+            witness = trusted_checkpoint_path.resolve()
+            for boundary, label in (
+                (log_directory, "audit log"),
+                (state_path.resolve().parent, "collector state"),
+            ):
+                try:
+                    witness.relative_to(boundary)
+                except ValueError:
+                    continue
+                raise ValueError(
+                    f"collector trusted checkpoint must be stored outside the {label} directory"
+                )
 
     async def __aenter__(self) -> AuditCollectorServer:
         await self.start()
@@ -615,17 +663,63 @@ class AuditCollectorServer:
                 "integrity_fields_forbidden", "collector assigns chain fields"
             )
         async with self._operation_lock:
-            existing = self._event_index.get(event.event_id)
-            if existing is not None:
-                if not hmac.compare_digest(_event_fingerprint(existing), _event_fingerprint(event)):
+            indexed = self._event_index.get(event.event_id)
+            if indexed is not None:
+                if not hmac.compare_digest(
+                    indexed.fingerprint_digest, _event_fingerprint_digest(event)
+                ):
                     raise AuditCollectorProtocolError("event_id_conflict", event.event_id)
+                committed = await self._committed_event(event.event_id, indexed)
                 await self._anchor_current_head()
-                committed = existing
             else:
                 committed = await self._audit_log.write(event)
-                self._event_index[event.event_id] = committed
+                self._remember(committed)
                 await self._anchor_current_head()
         return {"event": committed.model_dump(mode="json")}
+
+    def _remember(self, event: AuditEvent) -> None:
+        """Index one verified committed event and cache it within the bound."""
+
+        self._event_index[event.event_id] = _IndexedEvent(
+            sequence=event.sequence,
+            fingerprint_digest=_event_fingerprint_digest(event),
+        )
+        self._cache(event)
+
+    def _cache(self, event: AuditEvent) -> None:
+        """Retain a whole event for duplicate replies, evicting the least recent."""
+
+        self._recent_events.pop(event.event_id, None)
+        self._recent_events[event.event_id] = event
+        while len(self._recent_events) > self._max_cached_events:
+            self._recent_events.popitem(last=False)
+
+    async def _committed_event(self, event_id: str, indexed: _IndexedEvent) -> AuditEvent:
+        """Return the committed record for a duplicate append, reloading if evicted.
+
+        The reload path reads unverified JSONL, so the record must re-prove it is
+        the one this collector committed before it can be returned or cached. A
+        mismatch means the log no longer holds that record and fails closed; the
+        in-memory index is never re-derived from disk.
+        """
+
+        cached = self._recent_events.get(event_id)
+        if cached is not None:
+            self._recent_events.move_to_end(event_id)
+            return cached
+        events = await self._backend.read_all()
+        index = (indexed.sequence or 0) - 1
+        found: AuditEvent | None = None
+        if 0 <= index < len(events) and events[index].event_id == event_id:
+            found = events[index]
+        else:
+            found = next((item for item in events if item.event_id == event_id), None)
+        if found is None or not hmac.compare_digest(
+            _event_fingerprint_digest(found), indexed.fingerprint_digest
+        ):
+            raise AuditCollectorProtocolError("event_index_desynchronized", event_id)
+        self._cache(found)
+        return found
 
     async def _anchored_checkpoint(self) -> AuditCheckpoint | None:
         async with self._operation_lock:
@@ -716,9 +810,31 @@ class AuditCollectorServer:
             self._snapshots.pop(token, None)
 
     async def rotate_key(self, key_id: str, key: bytes) -> AuditKeyEpoch:
-        """Durably activate a new signing epoch before using it for events."""
+        """Durably activate a new signing epoch before using it for events.
+
+        An environment-sourced keyring can only be rebuilt from
+        ``AGENTGUARD_AUDIT_KEY`` and ``AGENTGUARD_AUDIT_KEYS``, so the epoch must
+        already be declared there: the declaration is what makes post-rotation
+        events verifiable after a restart, and this call confirms the epoch the
+        environment (and therefore the signed collector state) already commits
+        to. Rotating to an undeclared epoch is a one-way door and is refused.
+        A caller-injected keyring owns its own continuity and rotates in place.
+
+        Args:
+            key_id: Identifier of the epoch to activate.
+            key: Its signing key material.
+
+        Returns:
+            The activated key epoch.
+
+        Raises:
+            AuditKeyRotationRefusedError: If an environment-sourced keyring has
+                no matching declaration for this epoch.
+        """
 
         async with self._operation_lock:
+            if self._audit_log.keyring.environment_sourced:
+                return self._confirm_declared_epoch(key_id, key)
             checkpoint = await self._audit_log.export_checkpoint()
             activation = (checkpoint.head_sequence if checkpoint is not None else 0) + 1
             old_ring = self._audit_log.keyring
@@ -739,11 +855,32 @@ class AuditCollectorServer:
             self._state = state
             return candidate.epochs[-1]
 
+    def _confirm_declared_epoch(self, key_id: str, key: bytes) -> AuditKeyEpoch:
+        """Confirm an epoch the environment and the signed state already commit to."""
+
+        declared = next(
+            (epoch for epoch in self._audit_log.keyring.epochs if epoch.key_id == key_id),
+            None,
+        )
+        if declared is None or not hmac.compare_digest(
+            declared.key_fingerprint, hashlib.sha256(key).hexdigest()
+        ):
+            raise AuditKeyRotationRefusedError(key_id)
+        logger.warning(
+            "audit_key_rotation_requires_environment_continuity",
+            key_id=key_id,
+            activation_sequence=declared.activation_sequence,
+        )
+        return declared
+
     async def _initialize_state(self) -> None:
         await self._audit_log.recover_interrupted_append()
         snapshot = await self._audit_log.read_verified(require_checkpoint=False)
         checkpoint = await self._audit_log.export_checkpoint()
-        self._event_index = {event.event_id: event for event in snapshot.events}
+        self._event_index = {}
+        self._recent_events = OrderedDict()
+        for event in snapshot.events:
+            self._remember(event)
         stored = await asyncio.to_thread(self._read_state_sync)
         if stored is None:
             if snapshot.events and not self._adopt_existing:
@@ -756,9 +893,93 @@ class AuditCollectorServer:
             await asyncio.to_thread(self._write_state_sync, stored)
         self._verify_state_signature(stored, self._audit_log.keyring)
         if stored.key_epochs != self._audit_log.keyring.epochs:
-            raise AuditCollectorOwnershipError("collector key epochs differ from signed state")
+            stored = await self._commit_declared_epochs(stored, checkpoint)
         self._state = stored
         await self._reconcile_anchor(snapshot.events, checkpoint)
+        await self._reconcile_trusted_checkpoint(snapshot.events, checkpoint)
+
+    async def _reconcile_trusted_checkpoint(
+        self,
+        events: tuple[AuditEvent, ...],
+        local: AuditCheckpoint | None,
+    ) -> None:
+        """Refuse to start behind the off-host witness, then advance it.
+
+        The witness is the only artifact outside this host's failure domain, so
+        a local head behind it is the rollback signal that same-host state
+        cannot produce.
+        """
+
+        if self._trusted_checkpoint_path is None:
+            return
+        witness = await asyncio.to_thread(self._read_trusted_checkpoint_sync)
+        if witness is None:
+            # An absent witness beside a non-empty log is indistinguishable from
+            # one an attacker unmounted or deleted, so it is only bootstrapped
+            # for a fresh log or under explicit adoption.
+            if local is not None and not self._adopt_existing:
+                raise AuditCollectorOwnershipError(
+                    "trusted checkpoint is configured but absent; explicit adoption required"
+                )
+            logger.warning(
+                "audit_trusted_checkpoint_bootstrapped",
+                path=str(self._trusted_checkpoint_path),
+            )
+        else:
+            self._audit_log.verify_checkpoint_signature(witness)
+            if local is None or local.head_sequence < witness.head_sequence:
+                raise AuditRollbackDetectedError(
+                    trusted_head_sequence=witness.head_sequence,
+                    local_head_sequence=local.head_sequence if local is not None else 0,
+                )
+            anchored = events[witness.head_sequence - 1]
+            if (
+                anchored.event_hash != witness.head_event_hash
+                or anchored.chain_id != witness.chain_id
+            ):
+                raise AuditCollectorOwnershipError(
+                    "local history does not extend the trusted checkpoint"
+                )
+        if local is not None:
+            await asyncio.to_thread(self._write_trusted_checkpoint_sync, local)
+
+    async def _commit_declared_epochs(
+        self,
+        stored: CollectorState,
+        local: AuditCheckpoint | None,
+    ) -> CollectorState:
+        """Durably extend the committed epoch set with newly declared future epochs.
+
+        Only a strict suffix extension is accepted, and only when every added
+        epoch activates after the committed head — an epoch that reaches back
+        into committed history would reinterpret already-signed events.
+        """
+
+        epochs = self._audit_log.keyring.epochs
+        added = epochs[len(stored.key_epochs) :]
+        if not added or epochs[: len(stored.key_epochs)] != stored.key_epochs:
+            raise AuditCollectorOwnershipError("collector key epochs differ from signed state")
+        if not self._adopt_declared_epochs:
+            # The environment declaration is unauthenticated, so committing it
+            # into signed state is a deliberate operator action, never a
+            # side effect of a restart that happens to see a new variable.
+            raise AuditCollectorOwnershipError(
+                "signed state does not commit the declared audit key epochs; "
+                "explicit adoption required"
+            )
+        committed_head = local.head_sequence if local is not None else 0
+        if any(epoch.activation_sequence <= committed_head for epoch in added):
+            raise AuditCollectorOwnershipError(
+                "declared audit key epoch would rewrite a committed sequence"
+            )
+        extended = self._make_state(stored.checkpoint, self._audit_log.keyring, epochs[-1].key_id)
+        await asyncio.to_thread(self._write_state_sync, extended)
+        logger.warning(
+            "audit_key_epochs_committed",
+            key_ids=[epoch.key_id for epoch in added],
+            activation_sequences=[epoch.activation_sequence for epoch in added],
+        )
+        return extended
 
     async def _reconcile_anchor(
         self,
@@ -796,6 +1017,8 @@ class AuditCollectorServer:
         state = self._make_state(checkpoint, self._audit_log.keyring, signer)
         await asyncio.to_thread(self._write_state_sync, state)
         self._state = state
+        if self._trusted_checkpoint_path is not None and checkpoint is not None:
+            await asyncio.to_thread(self._write_trusted_checkpoint_sync, checkpoint)
 
     def _require_anchor_matches(self, checkpoint: AuditCheckpoint | None) -> None:
         if self._state is None or self._state.checkpoint != checkpoint:
@@ -847,22 +1070,40 @@ class AuditCollectorServer:
             return None
 
     def _write_state_sync(self, state: CollectorState) -> None:
-        self._state_path.parent.mkdir(parents=True, exist_ok=True)
+        self._write_atomic_sync(self._state_path, _canonical_json(state))
+
+    def _read_trusted_checkpoint_sync(self) -> AuditCheckpoint | None:
+        assert self._trusted_checkpoint_path is not None
+        try:
+            return AuditCheckpoint.model_validate_json(self._trusted_checkpoint_path.read_bytes())
+        except FileNotFoundError:
+            return None
+
+    def _write_trusted_checkpoint_sync(self, checkpoint: AuditCheckpoint) -> None:
+        assert self._trusted_checkpoint_path is not None
+        self._write_atomic_sync(
+            self._trusted_checkpoint_path,
+            checkpoint.model_dump_json().encode(),
+        )
+
+    @staticmethod
+    def _write_atomic_sync(destination: Path, payload: bytes) -> None:
+        destination.parent.mkdir(parents=True, exist_ok=True)
         temporary_name = ""
         try:
             with tempfile.NamedTemporaryFile(
                 mode="wb",
-                dir=self._state_path.parent,
-                prefix=f".{self._state_path.name}-",
+                dir=destination.parent,
+                prefix=f".{destination.name}-",
                 delete=False,
             ) as stream:
                 temporary_name = stream.name
                 os.fchmod(stream.fileno(), 0o600)
-                stream.write(_canonical_json(state))
+                stream.write(payload)
                 stream.flush()
                 os.fsync(stream.fileno())
-            os.replace(temporary_name, self._state_path)
-            directory_fd = os.open(self._state_path.parent, os.O_RDONLY)
+            os.replace(temporary_name, destination)
+            directory_fd = os.open(destination.parent, os.O_RDONLY)
             try:
                 os.fsync(directory_fd)
             finally:

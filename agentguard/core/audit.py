@@ -31,9 +31,11 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 from agentguard.exceptions import (
     AuditError,
     AuditEventConflictError,
+    AuditKeyEnvironmentError,
     AuditKeyMissingError,
     AuditKeyUnavailableError,
     AuditKeyWeakError,
+    AuditRollbackDetectedError,
     AuditTamperDetectedError,
 )
 from agentguard.models import (
@@ -396,6 +398,9 @@ logger = structlog.get_logger()
 _MIN_AUDIT_KEY_BYTES = 32
 """Minimum AGENTGUARD_AUDIT_KEY length, matching the sibling signed stores."""
 
+_AUDIT_KEYS_ENV = "AGENTGUARD_AUDIT_KEYS"
+"""Optional JSON declaration of signing epochs beyond the primary legacy key."""
+
 
 def _event_fingerprint(event: AuditEvent) -> bytes:
     """Canonical unsigned content used to make stable event IDs idempotent."""
@@ -483,7 +488,7 @@ class AuditKeyEpoch:
 class AuditKeyring:
     """Immutable key material and strictly ordered activation epochs."""
 
-    __slots__ = ("_epochs", "_keys", "_legacy_key_id")
+    __slots__ = ("_environment_sourced", "_epochs", "_keys", "_legacy_key_id")
 
     def __init__(
         self,
@@ -491,6 +496,7 @@ class AuditKeyring:
         keys: Mapping[str, bytes],
         epochs: Iterable[AuditKeyEpoch],
         legacy_key_id: str,
+        environment_sourced: bool = False,
     ) -> None:
         copied_keys = {
             key_id: bytes(bytearray(key)) for key_id, key in keys.items() if key_id and key
@@ -517,10 +523,22 @@ class AuditKeyring:
         self._keys = MappingProxyType(copied_keys)
         self._epochs = epoch_tuple
         self._legacy_key_id = legacy_key_id
+        self._environment_sourced = environment_sourced
 
     @property
     def keys(self) -> Mapping[str, bytes]:
         return self._keys
+
+    @property
+    def environment_sourced(self) -> bool:
+        """Whether restart continuity for this keyring depends on the environment.
+
+        An environment-sourced keyring can only be rebuilt from
+        ``AGENTGUARD_AUDIT_KEY`` and ``AGENTGUARD_AUDIT_KEYS``, so any epoch the
+        environment does not declare is unrecoverable after a restart.
+        """
+
+        return self._environment_sourced
 
     @property
     def epochs(self) -> tuple[AuditKeyEpoch, ...]:
@@ -532,7 +550,21 @@ class AuditKeyring:
 
     @classmethod
     def from_environment(cls) -> AuditKeyring:
-        """Build the backward-compatible single-epoch environment keyring."""
+        """Build the environment keyring: the legacy epoch plus declared rotations.
+
+        ``AGENTGUARD_AUDIT_KEY`` always supplies epoch 1 (the legacy key).
+        ``AGENTGUARD_AUDIT_KEYS`` optionally declares later epochs as a JSON
+        object mapping ``key_id`` to ``{"key": ..., "activation_sequence": ...}``,
+        so a process restarted after a rotation can still verify every event.
+
+        Returns:
+            An immutable keyring whose epochs are ordered by activation sequence.
+
+        Raises:
+            AuditKeyMissingError: If AGENTGUARD_AUDIT_KEY is not set.
+            AuditKeyWeakError: If any declared key is below the key-length floor.
+            AuditKeyEnvironmentError: If AGENTGUARD_AUDIT_KEYS is malformed.
+        """
 
         key_text = os.environ.get("AGENTGUARD_AUDIT_KEY", "")
         if not key_text:
@@ -548,17 +580,82 @@ class AuditKeyring:
         # logs already signed under it; with a >=32-byte key this is not a
         # practical oracle. Set AGENTGUARD_AUDIT_KEY_ID to decouple the label.
         key_id = os.environ.get("AGENTGUARD_AUDIT_KEY_ID") or hashlib.sha256(key).hexdigest()[:16]
-        return cls(
-            keys={key_id: key},
-            epochs=(
+        keys = {key_id: key}
+        epochs = [
+            AuditKeyEpoch(
+                key_id=key_id,
+                activation_sequence=1,
+                key_fingerprint=hashlib.sha256(key).hexdigest(),
+            )
+        ]
+        for extra_id, extra_key, activation in cls._declared_environment_epochs(key_id):
+            keys[extra_id] = extra_key
+            epochs.append(
                 AuditKeyEpoch(
-                    key_id=key_id,
-                    activation_sequence=1,
-                    key_fingerprint=hashlib.sha256(key).hexdigest(),
-                ),
-            ),
+                    key_id=extra_id,
+                    activation_sequence=activation,
+                    key_fingerprint=hashlib.sha256(extra_key).hexdigest(),
+                )
+            )
+        return cls(
+            keys=keys,
+            epochs=sorted(epochs, key=lambda epoch: epoch.activation_sequence),
             legacy_key_id=key_id,
+            environment_sourced=True,
         )
+
+    @staticmethod
+    def _declared_environment_epochs(
+        legacy_key_id: str,
+    ) -> tuple[tuple[str, bytes, int], ...]:
+        """Parse AGENTGUARD_AUDIT_KEYS into ``(key_id, key, activation)`` triples.
+
+        Every structural problem fails closed. No key material — not even a
+        prefix — is placed in any raised message.
+        """
+
+        raw = os.environ.get(_AUDIT_KEYS_ENV, "").strip()
+        if not raw:
+            return ()
+        try:
+            declared = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise AuditKeyEnvironmentError("value is not valid JSON") from exc
+        if not isinstance(declared, dict):
+            raise AuditKeyEnvironmentError("value must be a JSON object of key IDs")
+        parsed: list[tuple[str, bytes, int]] = []
+        activations = {1}
+        for declared_id, entry in declared.items():
+            if not declared_id:
+                raise AuditKeyEnvironmentError("key IDs must not be empty")
+            if declared_id == legacy_key_id:
+                raise AuditKeyEnvironmentError(f"key ID {declared_id!r} rebinds the primary key")
+            if not isinstance(entry, dict) or set(entry) != {"key", "activation_sequence"}:
+                raise AuditKeyEnvironmentError(
+                    f"entry {declared_id!r} must declare exactly 'key' and 'activation_sequence'"
+                )
+            key_text = entry["key"]
+            activation = entry["activation_sequence"]
+            if not isinstance(key_text, str) or not key_text:
+                raise AuditKeyEnvironmentError(f"entry {declared_id!r} has a non-string key")
+            if not isinstance(activation, int) or isinstance(activation, bool):
+                raise AuditKeyEnvironmentError(
+                    f"entry {declared_id!r} has a non-integer activation_sequence"
+                )
+            if activation < 1:
+                raise AuditKeyEnvironmentError(
+                    f"entry {declared_id!r} has a non-positive activation_sequence"
+                )
+            if activation in activations:
+                raise AuditKeyEnvironmentError(
+                    f"entry {declared_id!r} reuses activation_sequence {activation}"
+                )
+            key = key_text.encode("utf-8")
+            if len(key) < _MIN_AUDIT_KEY_BYTES:
+                raise AuditKeyWeakError(minimum_bytes=_MIN_AUDIT_KEY_BYTES)
+            activations.add(activation)
+            parsed.append((declared_id, key, activation))
+        return tuple(parsed)
 
     def key_for_id(self, key_id: str) -> bytes:
         try:
@@ -601,6 +698,7 @@ class AuditKeyring:
             keys={**self._keys, key_id: copied},
             epochs=(epoch,) if replaces_unused_legacy else (*self._epochs, epoch),
             legacy_key_id=self._legacy_key_id,
+            environment_sourced=self._environment_sourced,
         )
 
 
@@ -1522,13 +1620,14 @@ class AppendOnlyAuditLog:
         self._validate_checkpoint(tail, checkpoint)
         if self._trusted_checkpoint is not None:
             trusted = self._trusted_checkpoint
-            if (
-                checkpoint is None
-                or checkpoint.head_sequence < trusted.head_sequence
-                or (
-                    checkpoint.head_sequence == trusted.head_sequence
-                    and checkpoint.head_event_hash != trusted.head_event_hash
+            if checkpoint is None or checkpoint.head_sequence < trusted.head_sequence:
+                raise AuditRollbackDetectedError(
+                    trusted_head_sequence=trusted.head_sequence,
+                    local_head_sequence=checkpoint.head_sequence if checkpoint is not None else 0,
                 )
+            if (
+                checkpoint.head_sequence == trusted.head_sequence
+                and checkpoint.head_event_hash != trusted.head_event_hash
             ):
                 raise AuditTamperDetectedError(
                     event_index=max(trusted.head_sequence - 1, 0),
@@ -1714,6 +1813,12 @@ class AppendOnlyAuditLog:
         *,
         checkpoint_supported: bool,
     ) -> ChainVerificationResult:
+        if self._trusted_checkpoint is not None:
+            # An authentic off-host witness is dispositive and must be checked
+            # before any "nothing to verify" shortcut can return a clean verdict:
+            # deleting the whole audit directory yields zero events, and a log
+            # truncated to a legacy tail yields no local checkpoint to validate.
+            self._validate_trusted_checkpoint(events, self._trusted_checkpoint)
         if not events:
             if checkpoint is not None:
                 raise AuditTamperDetectedError(event_index=0, event_id="<checkpoint>")
@@ -1770,10 +1875,10 @@ class AppendOnlyAuditLog:
                 checkpoint is not None if events[-1].hash_schema_version >= 3 else None
             )
             if checkpoint_valid:
+                # The trusted checkpoint, if any, was already validated above.
                 if self._trusted_checkpoint is None:
                     checkpoint_status = "verified_unanchored"
                 else:
-                    self._validate_trusted_checkpoint(events, self._trusted_checkpoint)
                     checkpoint_status = "verified"
                     attestable = True
             else:
@@ -1792,6 +1897,35 @@ class AppendOnlyAuditLog:
             head_event_hash=events[-1].event_hash,
         )
 
+    def verify_checkpoint_signature(self, checkpoint: AuditCheckpoint) -> None:
+        """Validate a checkpoint's own signature without binding it to history.
+
+        Callers holding an out-of-band checkpoint — an off-host rollback witness,
+        for example — use this to prove the file is authentic before comparing it
+        against a local chain.
+
+        Args:
+            checkpoint: The signed checkpoint to authenticate.
+
+        Raises:
+            AuditKeyUnavailableError: If its signing epoch is not in the keyring.
+            AuditTamperDetectedError: If the checkpoint is malformed or unsigned.
+        """
+
+        self._keyring.key_for_id(checkpoint.signing_key_id)
+        if (
+            checkpoint.head_sequence < 1
+            or checkpoint.event_count != checkpoint.head_sequence
+            or not hmac.compare_digest(
+                checkpoint.signature,
+                self._compute_checkpoint_hash(checkpoint),
+            )
+        ):
+            raise AuditTamperDetectedError(
+                event_index=max(checkpoint.head_sequence - 1, 0),
+                event_id="<trusted-checkpoint>",
+            )
+
     def _validate_trusted_checkpoint(
         self,
         events: list[AuditEvent],
@@ -1800,19 +1934,13 @@ class AppendOnlyAuditLog:
         """Verify an out-of-band checkpoint and its committed event in this history."""
 
         index = trusted.head_sequence - 1
-        self._keyring.key_for_id(trusted.signing_key_id)
-        if (
-            trusted.head_sequence < 1
-            or trusted.event_count != trusted.head_sequence
-            or not hmac.compare_digest(
-                trusted.signature,
-                self._compute_checkpoint_hash(trusted),
-            )
-            or index >= len(events)
-        ):
-            raise AuditTamperDetectedError(
-                event_index=max(index, 0),
-                event_id="<trusted-checkpoint>",
+        self.verify_checkpoint_signature(trusted)
+        if index >= len(events):
+            # The witness is authentic and commits to a head this log no longer
+            # reaches: the log was rolled back, not edited in place.
+            raise AuditRollbackDetectedError(
+                trusted_head_sequence=trusted.head_sequence,
+                local_head_sequence=len(events),
             )
         anchored = events[index]
         if (
