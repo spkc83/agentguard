@@ -39,6 +39,10 @@ jobs:
         with:
           python-version: "3.11"
       - run: pip install -e ".[dev,sandbox,verify,observability]"
+      # The runner image pins an older setuptools with known advisories
+      # (e.g. PYSEC-2026-3447); it is build tooling, not a declared
+      # dependency, so upgrade it in this environment before auditing.
+      - run: pip install --upgrade "setuptools>=83"
       - name: pip-audit (known vulnerabilities in installed dependencies)
         run: pip-audit --desc on  # no --strict: the editable local package itself is unauditable
 

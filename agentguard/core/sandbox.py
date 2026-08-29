@@ -310,12 +310,29 @@ class DockerSandboxBackend:
 
 
 def _is_docker_timeout(exc: BaseException) -> bool:
-    """Recognize SDK/requests timeouts without importing optional dependencies."""
+    """Recognize SDK/requests timeouts without importing optional dependencies.
 
-    return isinstance(exc, TimeoutError) or (
-        type(exc).__name__ == "ReadTimeout"
-        and type(exc).__module__.startswith(("requests.", "urllib3."))
-    )
+    ``container.wait(timeout=N)`` surfaces its read timeout as
+    ``requests.exceptions.ConnectionError`` raised FROM
+    ``urllib3.exceptions.ReadTimeoutError`` (itself from ``socket.timeout``),
+    so the timeout signal lives in the exception chain, not on the surface
+    exception. Walk ``__cause__``/``__context__`` rather than matching only
+    the outermost type; a genuine daemon connection failure carries no
+    timeout anywhere in its chain and stays an internal error.
+    """
+
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, TimeoutError):
+            return True
+        if type(current).__name__ in {"ReadTimeout", "ReadTimeoutError"} and type(
+            current
+        ).__module__.startswith(("requests.", "urllib3.")):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
 
 
 def _read_bounded_logs(container: object, *, stdout: bool) -> bytes:

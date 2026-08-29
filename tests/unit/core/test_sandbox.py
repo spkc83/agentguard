@@ -280,3 +280,54 @@ class TestDockerSandboxBackend:
         with pytest.raises(asyncio.CancelledError):
             await task
         assert cleaned.is_set()
+
+
+class TestDockerTimeoutClassifier:
+    """`container.wait` timeouts arrive wrapped; the classifier must walk the chain."""
+
+    def test_surface_read_timeout_is_a_timeout(self) -> None:
+        from agentguard.core.sandbox import _is_docker_timeout
+
+        read_timeout = type("ReadTimeout", (OSError,), {"__module__": "requests.exceptions"})
+        assert _is_docker_timeout(read_timeout())
+
+    def test_wrapped_wait_timeout_chain_is_a_timeout(self) -> None:
+        """requests.ConnectionError <- urllib3.ReadTimeoutError <- socket.timeout.
+
+        This is the exact chain docker-py surfaces when ``container.wait``
+        exceeds its read timeout on a real daemon (observed in CI); the
+        surface exception is neither a TimeoutError nor named ReadTimeout.
+        """
+        from agentguard.core.sandbox import _is_docker_timeout
+
+        read_timeout_error = type(
+            "ReadTimeoutError", (OSError,), {"__module__": "urllib3.exceptions"}
+        )
+        connection_error = type(
+            "ConnectionError", (OSError,), {"__module__": "requests.exceptions"}
+        )
+        inner = read_timeout_error("Read timed out.")
+        inner.__cause__ = TimeoutError("timed out")
+        outer = connection_error(inner)
+        outer.__cause__ = inner
+        assert _is_docker_timeout(outer)
+
+    def test_plain_connection_failure_is_not_a_timeout(self) -> None:
+        """A daemon connection drop with no timeout in its chain stays internal."""
+        from agentguard.core.sandbox import _is_docker_timeout
+
+        connection_error = type(
+            "ConnectionError", (OSError,), {"__module__": "requests.exceptions"}
+        )
+        protocol_error = type("ProtocolError", (OSError,), {"__module__": "urllib3.exceptions"})
+        inner = protocol_error("Connection aborted.")
+        outer = connection_error(inner)
+        outer.__cause__ = inner
+        assert not _is_docker_timeout(outer)
+
+    def test_self_referential_chain_terminates(self) -> None:
+        from agentguard.core.sandbox import _is_docker_timeout
+
+        error = ValueError("loop")
+        error.__context__ = error
+        assert not _is_docker_timeout(error)
