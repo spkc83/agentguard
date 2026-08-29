@@ -1,12 +1,17 @@
-name: "FINOS AI Governance Framework v2.0"
+name: "FINOS AIGF v2.0-aligned controls (unofficial mapping)"
 version: "2.0"
+schema_version: 2
 description: >
-  Policy rules based on the FINOS AI Governance Framework v2.0.
-  46 risks mapped across Governance, Risk Management, Technology, and Operations.
-  Priority subset: top 15 rules for v0.3.
+  15 controls informed by FINOS AIGF v2.0, covering Governance, Risk Management,
+  Technology, and Operations themes. Rule IDs are AgentGuard-local (AG-FINOS-NNN);
+  they are not FINOS AIR-* risk IDs and this bundle is not an official mapping to
+  the FINOS risk registry. An official mapping requires domain review.
 
 rules:
-  - id: FINOS-AIGF-001
+  - id: AG-FINOS-001
+    stage: attestation
+    applies_to: all
+    on_fail: warn
     name: Model Risk Management
     severity: critical
     description: >
@@ -21,7 +26,10 @@ rules:
     references:
       - https://github.com/finos/ai-governance-framework
 
-  - id: FINOS-AIGF-002
+  - id: AG-FINOS-002
+    stage: attestation
+    applies_to: all
+    on_fail: warn
     name: Data Quality and Governance
     severity: high
     description: >
@@ -36,7 +44,10 @@ rules:
     references:
       - https://github.com/finos/ai-governance-framework
 
-  - id: FINOS-AIGF-003
+  - id: AG-FINOS-003
+    stage: attestation
+    applies_to: all
+    on_fail: warn
     name: Explainability and Transparency
     severity: high
     description: >
@@ -51,7 +62,10 @@ rules:
     references:
       - https://github.com/finos/ai-governance-framework
 
-  - id: FINOS-AIGF-004
+  - id: AG-FINOS-004
+    stage: attestation
+    applies_to: all
+    on_fail: warn
     name: Fairness and Bias
     severity: critical
     description: >
@@ -66,12 +80,16 @@ rules:
     references:
       - https://github.com/finos/ai-governance-framework
 
-  - id: FINOS-AIGF-005
+  - id: AG-FINOS-005
     name: Human Oversight
     severity: critical
     description: >
       High-risk AI decisions must have human oversight mechanisms in place.
       Credit decisions above materiality thresholds require HITL review.
+    stage: pre_tool
+    applies_to:
+      action: ["tool:credit_decision*", "tool:loan_approval*", "tool:account_closure*"]
+    on_fail: escalate
     check:
       type: content_scan
       targets: [action]
@@ -85,7 +103,10 @@ rules:
     references:
       - https://github.com/finos/ai-governance-framework
 
-  - id: FINOS-AIGF-008
+  - id: AG-FINOS-008
+    stage: attestation
+    applies_to: all
+    on_fail: warn
     name: Operational Resilience
     severity: high
     description: >
@@ -100,7 +121,10 @@ rules:
     references:
       - https://github.com/finos/ai-governance-framework
 
-  - id: FINOS-AIGF-010
+  - id: AG-FINOS-010
+    stage: attestation
+    applies_to: all
+    on_fail: warn
     name: Audit Trail Completeness
     severity: critical
     description: >
@@ -115,12 +139,16 @@ rules:
     references:
       - https://github.com/finos/ai-governance-framework
 
-  - id: FINOS-AIGF-012
+  - id: AG-FINOS-012
     name: Third-Party Risk
     severity: high
     description: >
       External API calls and third-party tool usage must be monitored
       and subject to governance controls.
+    stage: pre_tool
+    applies_to:
+      resource: ["external/*", "api/*", "vendor/*"]
+    on_fail: warn
     check:
       type: resource_pattern
       patterns:
@@ -133,12 +161,16 @@ rules:
     references:
       - https://github.com/finos/ai-governance-framework
 
-  - id: FINOS-AIGF-015
+  - id: AG-FINOS-015
     name: Privacy and Data Protection
     severity: critical
     description: >
       PII and sensitive financial data must be protected throughout
       the agent processing pipeline. FCRA and GLBA requirements apply.
+    stage: pre_tool
+    applies_to:
+      resource: ["*pii*", "*ssn*", "*account_number*", "*credit_report*"]
+    on_fail: warn
     check:
       type: resource_pattern
       patterns:
@@ -152,7 +184,10 @@ rules:
     references:
       - https://github.com/finos/ai-governance-framework
 
-  - id: FINOS-AIGF-018
+  - id: AG-FINOS-018
+    stage: attestation
+    applies_to: all
+    on_fail: warn
     name: Model Validation
     severity: high
     description: >
@@ -167,7 +202,10 @@ rules:
     references:
       - https://github.com/finos/ai-governance-framework
 
-  - id: FINOS-AIGF-022
+  - id: AG-FINOS-022
+    stage: attestation
+    applies_to: all
+    on_fail: warn
     name: Concentration Risk
     severity: medium
     description: >
@@ -182,12 +220,16 @@ rules:
     references:
       - https://github.com/finos/ai-governance-framework
 
-  - id: FINOS-AIGF-025
+  - id: AG-FINOS-025
     name: Change Management
     severity: medium
     description: >
       Changes to AI agent configurations, policies, and models must
       follow documented change management procedures.
+    stage: pre_tool
+    applies_to:
+      action: ["config:update*", "policy:modify*", "model:deploy*"]
+    on_fail: escalate
     check:
       type: action_blocklist
       patterns:
@@ -200,7 +242,10 @@ rules:
     references:
       - https://github.com/finos/ai-governance-framework
 
-  - id: FINOS-AIGF-030
+  - id: AG-FINOS-030
+    stage: attestation
+    applies_to: all
+    on_fail: warn
     name: Incident Management
     severity: high
     description: >
@@ -215,7 +260,10 @@ rules:
     references:
       - https://github.com/finos/ai-governance-framework
 
-  - id: FINOS-AIGF-035
+  - id: AG-FINOS-035
+    stage: attestation
+    applies_to: all
+    on_fail: warn
     name: Regulatory Reporting
     severity: high
     description: >
@@ -230,12 +278,15 @@ rules:
     references:
       - https://github.com/finos/ai-governance-framework
 
-  - id: FINOS-AIGF-040
+  - id: AG-FINOS-040
     name: Ethical AI Use
     severity: medium
     description: >
       AI agents must operate within ethical boundaries defined by
       the organization's AI ethics policy.
+    stage: pre_tool
+    applies_to: all
+    on_fail: warn
     check:
       type: content_scan
       targets: [action, resource]

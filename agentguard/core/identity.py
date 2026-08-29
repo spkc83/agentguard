@@ -1,8 +1,13 @@
-"""Agent identity registry.
+"""Legacy caller-asserted agent identity registries.
 
 Two registry implementations:
 - AgentRegistry: in-memory only (fast, no persistence).
 - FileBackedRegistry: persists to a JSON file with atomic writes.
+
+These compatibility types do not authenticate registration or sign persisted
+authorization state. Authentication-sensitive deployments must use the
+authoritative registry and authenticated control-plane surfaces in
+``agentguard.core.registry*``.
 """
 
 from __future__ import annotations
@@ -22,7 +27,11 @@ logger = structlog.get_logger()
 
 
 class AgentRegistry:
-    """In-memory agent identity registry."""
+    """Legacy in-memory registry for explicit compatibility mode only.
+
+    Callers can assign their own IDs and roles. This is not an authentication or
+    authorization authority for secure kernels.
+    """
 
     def __init__(self) -> None:
         self._agents: dict[str, AgentIdentity] = {}
@@ -85,10 +94,12 @@ class AgentRegistry:
 
 
 class FileBackedRegistry:
-    """Agent identity registry backed by a JSON file.
+    """Legacy unsigned JSON registry for explicit compatibility mode only.
 
     Persists agents atomically using write-to-temp + os.replace.
     Loads existing agents from file on construction.
+    The file is neither authenticated nor hardened against local tampering; do
+    not use it as an authorization authority.
 
     Args:
         path: Path to the JSON file for persistence.

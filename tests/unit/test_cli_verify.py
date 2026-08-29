@@ -4,12 +4,15 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import pytest
 from typer.testing import CliRunner
 
 from agentguard.cli import app
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+pytest.importorskip("z3")
 
 runner = CliRunner()
 

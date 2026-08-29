@@ -1,152 +1,206 @@
-"""Credit decisioning agent templates.
-
-Pre-built, AgentGuard-wrapped agent configurations for automated credit
-decisioning workflows. The template defines the decision logic; the
-actual governance (RBAC, audit, sandbox) is provided by the AgentGuard
-runtime.
-
-Decision flow:
-  Application -> PD Model Score -> Decision Band -> Action
-    - PD < auto_approve_threshold: AUTO_APPROVE
-    - PD in [auto_approve_threshold, decline_threshold): REVIEW (HITL)
-    - PD >= decline_threshold: DECLINE -> Adverse Action Notice
-"""
+"""Pure credit-decision policy contracts for governed credit emission."""
 
 from __future__ import annotations
 
-from typing import Any, Literal
+import math
+from enum import StrEnum
+from numbers import Real
 
-import structlog
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
-logger = structlog.get_logger()
+from agentguard.exceptions import AdverseActionFailure  # noqa: TC001 - Pydantic runtime type
+from agentguard.guardrails import DecisionPayload
+
+from .attribution import AttributionResult  # noqa: TC001 - Pydantic runtime type
+from .decision_reasons import (  # noqa: TC001 - Pydantic runtime type
+    PolicyDenialSelection,
+    ReviewJudgment,
+)
+from .reason_codes import ReasonCodeSelection  # noqa: TC001 - Pydantic runtime type
 
 
-class CreditDecisionConfig(BaseModel):
-    """Configuration for credit decisioning agent.
+def _canonical_text(value: str, *, field_name: str) -> str:
+    if not value or value != value.strip() or not value.isprintable():
+        raise ValueError(f"{field_name} must be canonical printable text")
+    return value
 
-    Args:
-        auto_approve_threshold: PD below this -> auto-approve.
-        decline_threshold: PD at or above this -> auto-decline.
-        max_loan_amount: Maximum loan amount for auto-approval.
-        min_fico_score: Minimum FICO for auto-approval.
-        max_dti_ratio: Maximum DTI for auto-approval.
-    """
 
-    model_config = ConfigDict(frozen=True)
+class CreditDecisionOutcome(StrEnum):
+    """Closed decision bands produced by :class:`CreditDecisionPolicy`."""
 
+    APPROVE = "approve"
+    REVIEW = "review"
+    DECLINE = "decline"
+
+
+class CreditDecisionPolicyConfig(BaseModel):
+    """Versioned PD thresholds for one deterministic credit-decision policy."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    policy_id: str = "pd-bands"
+    policy_version: str = "1"
     auto_approve_threshold: float = 0.05
     decline_threshold: float = 0.20
-    max_loan_amount: float = 500000.0
-    min_fico_score: int = 620
-    max_dti_ratio: float = 0.43
+
+    @field_validator("policy_id", "policy_version")
+    @classmethod
+    def _validate_identifiers(cls, value: str, info: object) -> str:
+        field_name = getattr(info, "field_name", "identifier")
+        return _canonical_text(value, field_name=field_name)
+
+    @field_validator("auto_approve_threshold", "decline_threshold", mode="before")
+    @classmethod
+    def _validate_threshold(cls, value: object) -> float:
+        if isinstance(value, bool) or not isinstance(value, Real):
+            raise ValueError("decision thresholds must be finite values in [0, 1]")
+        result = float(value)
+        if not math.isfinite(result) or not 0 <= result <= 1:
+            raise ValueError("decision thresholds must be finite values in [0, 1]")
+        return result
+
+    @model_validator(mode="after")
+    def _validate_order(self) -> CreditDecisionPolicyConfig:
+        if self.auto_approve_threshold >= self.decline_threshold:
+            raise ValueError("auto_approve_threshold must be below decline_threshold")
+        return self
 
 
-class CreditDecision(BaseModel):
-    """Result of a credit decision evaluation.
+class CreditDecisionCandidate(BaseModel):
+    """Local typed candidate presented to the governed emission boundary.
 
-    Args:
-        applicant_id: The applicant's identifier.
-        decision: The decision outcome.
-        pd_score: Probability of default.
-        reasons: Reasons for the decision.
-        requires_review: Whether HITL review is needed.
-        feature_importances: Model feature importance scores.
+    A decline may intentionally lack reason evidence or carry a typed mapping
+    failure. That lets the ``ON_DECISION`` guardrail sign the exact fail-closed
+    outcome instead of losing the decision before governance.
+
+    A decline may also rest on a credit-policy overlay denial or a completed
+    reviewer's judgment instead of, or alongside, model reasons. Both non-model
+    bases must name this exact application and decision, so neither can be
+    lifted from another file.
     """
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
-    applicant_id: str
-    decision: Literal["approved", "declined", "review"]
+    decision_id: str
+    application_ref: str
+    outcome: CreditDecisionOutcome
     pd_score: float
-    reasons: list[str] = []
-    requires_review: bool = False
-    feature_importances: dict[str, float] = {}
+    policy_id: str
+    policy_version: str
+    model_id: str
+    model_version: str
+    attribution: AttributionResult | None = None
+    reason_selection: ReasonCodeSelection | None = None
+    policy_denial: PolicyDenialSelection | None = None
+    review_judgment: ReviewJudgment | None = None
+    reason_failure: AdverseActionFailure | None = None
+
+    @field_validator(
+        "decision_id",
+        "application_ref",
+        "policy_id",
+        "policy_version",
+        "model_id",
+        "model_version",
+    )
+    @classmethod
+    def _validate_identifiers(cls, value: str, info: object) -> str:
+        field_name = getattr(info, "field_name", "identifier")
+        return _canonical_text(value, field_name=field_name)
+
+    @field_validator("pd_score", mode="before")
+    @classmethod
+    def _validate_pd(cls, value: object) -> float:
+        if isinstance(value, bool) or not isinstance(value, Real):
+            raise ValueError("pd_score must be a finite value in [0, 1]")
+        result = float(value)
+        if not math.isfinite(result) or not 0 <= result <= 1:
+            raise ValueError("pd_score must be a finite value in [0, 1]")
+        return result
+
+    @model_validator(mode="after")
+    def _validate_reason_state(self) -> CreditDecisionCandidate:
+        bases = (self.reason_selection, self.policy_denial, self.review_judgment)
+        if self.reason_failure is not None and any(basis is not None for basis in bases):
+            raise ValueError("a reason failure excludes every principal-reason basis")
+        for basis in (self.policy_denial, self.review_judgment):
+            if basis is None:
+                continue
+            if self.outcome is not CreditDecisionOutcome.DECLINE:
+                raise ValueError("policy and review reasons are legal only on a decline")
+            if (
+                basis.application_ref != self.application_ref
+                or basis.decision_id != self.decision_id
+            ):
+                raise ValueError("policy and review reasons must name this application decision")
+        return self
+
+    @property
+    def requires_review(self) -> bool:
+        return self.outcome is CreditDecisionOutcome.REVIEW
+
+    def to_payload(self) -> DecisionPayload:
+        """Return the immutable full-fidelity payload consumed by decision guardrails."""
+
+        return DecisionPayload.model_validate(
+            {
+                "domain": "credit_risk",
+                "decision_id": self.decision_id,
+                "outcome": self.outcome.value,
+                "body": self.model_dump(mode="json"),
+            }
+        )
 
 
-class CreditDecisioningAgent:
-    """Credit decisioning agent template.
+class CreditDecisionPolicy:
+    """Pure deterministic threshold policy with no logging or governance side effects."""
 
-    Evaluates loan applications against configurable thresholds and
-    produces structured decisions. Designed to be wrapped with
-    AgentGuard governance (RBAC, audit, circuit breaker).
+    def __init__(self, config: CreditDecisionPolicyConfig | None = None) -> None:
+        self._config = config or CreditDecisionPolicyConfig()
 
-    Args:
-        config: Decision configuration with thresholds.
-    """
-
-    def __init__(self, config: CreditDecisionConfig | None = None) -> None:
-        self._config = config or CreditDecisionConfig()
+    @property
+    def config(self) -> CreditDecisionPolicyConfig:
+        return self._config
 
     def evaluate(
         self,
-        applicant_id: str,
+        *,
+        decision_id: str,
+        application_ref: str,
         pd_score: float,
-        application: dict[str, Any] | None = None,
-    ) -> CreditDecision:
-        """Evaluate a credit application.
+        model_id: str,
+        model_version: str,
+        attribution: AttributionResult | None = None,
+        reason_selection: ReasonCodeSelection | None = None,
+        policy_denial: PolicyDenialSelection | None = None,
+        reason_failure: AdverseActionFailure | None = None,
+    ) -> CreditDecisionCandidate:
+        """Classify one PD without fabricating reasons or inspecting raw features.
 
-        Args:
-            applicant_id: Applicant identifier.
-            pd_score: Model-predicted probability of default.
-            application: Application data dict with optional fields:
-                fico_score, dti_ratio, loan_amount, etc.
-
-        Returns:
-            CreditDecision with outcome and reasoning.
+        A recorded credit-policy overlay denial is a hard cutoff: it declines the
+        application whatever band the PD falls in.
         """
-        app = application or {}
-        reasons: list[str] = []
-        cfg = self._config
 
-        # Hard cutoff checks
-        fico = app.get("fico_score")
-        if fico is not None and fico < cfg.min_fico_score:
-            reasons.append(f"FICO score {fico} below minimum {cfg.min_fico_score}")
-
-        dti = app.get("dti_ratio")
-        if dti is not None and dti > cfg.max_dti_ratio:
-            reasons.append(f"DTI ratio {dti:.2f} exceeds maximum {cfg.max_dti_ratio:.2f}")
-
-        loan_amount = app.get("loan_amount")
-        if loan_amount is not None and loan_amount > cfg.max_loan_amount:
-            reasons.append(
-                f"Loan amount ${loan_amount:,.0f} exceeds maximum ${cfg.max_loan_amount:,.0f}"
-            )
-
-        # PD-based decision banding
-        if pd_score >= cfg.decline_threshold or len(reasons) >= 2:
-            decision_type: Literal["approved", "declined", "review"] = "declined"
-            reasons.insert(0, f"PD score {pd_score:.4f} exceeds decline threshold")
-        elif pd_score < cfg.auto_approve_threshold and not reasons:
-            decision_type = "approved"
-            reasons = [f"PD score {pd_score:.4f} within auto-approve band"]
+        config = self._config
+        if policy_denial is not None:
+            outcome = CreditDecisionOutcome.DECLINE
+        elif pd_score < config.auto_approve_threshold:
+            outcome = CreditDecisionOutcome.APPROVE
+        elif pd_score >= config.decline_threshold:
+            outcome = CreditDecisionOutcome.DECLINE
         else:
-            decision_type = "review"
-            reasons.insert(0, f"PD score {pd_score:.4f} in review band")
-
-        # Compute simple feature importances from application data
-        feature_importances: dict[str, float] = {}
-        if fico is not None:
-            # Lower FICO = higher adverse impact
-            feature_importances["fico_score"] = max(0, (700 - fico) / 100)
-        if dti is not None:
-            feature_importances["dti_ratio"] = max(0, (dti - 0.35) / 0.1)
-        feature_importances["pd_score"] = pd_score
-
-        decision = CreditDecision(
-            applicant_id=applicant_id,
-            decision=decision_type,
+            outcome = CreditDecisionOutcome.REVIEW
+        return CreditDecisionCandidate(
+            decision_id=decision_id,
+            application_ref=application_ref,
+            outcome=outcome,
             pd_score=pd_score,
-            reasons=reasons,
-            requires_review=decision_type == "review",
-            feature_importances=feature_importances,
+            policy_id=config.policy_id,
+            policy_version=config.policy_version,
+            model_id=model_id,
+            model_version=model_version,
+            attribution=attribution,
+            reason_selection=reason_selection,
+            policy_denial=policy_denial,
+            reason_failure=reason_failure,
         )
-
-        logger.info(
-            "credit_decision_made",
-            applicant_id=applicant_id,
-            decision=decision_type,
-            pd_score=pd_score,
-        )
-        return decision

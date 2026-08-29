@@ -2,7 +2,28 @@
 
 ## System Overview
 
-AgentGuard is a **governance middleware** — it does not orchestrate agents; it governs them. Every agent action (tool call, inter-agent message, external API call) passes through AgentGuard's runtime before execution. The architecture is a four-layer stack that can be adopted incrementally: a team can start with Layer 1 (security) alone and add compliance, domain toolkits, and observability over time.
+AgentGuard is a **governance middleware** — it does not orchestrate agents; it governs them. Every agent action (tool call, inter-agent message, external API call) routed through an AgentGuard adapter passes through its runtime before execution. The architecture is a four-layer stack that can be adopted incrementally: a team can start with Layer 1 (security) alone and add compliance, domain toolkits, and observability over time.
+
+> **Read this first.** This document describes both what is implemented and what the
+> architecture is designed to support. `GovernanceKernel` owns the governed call
+> path: immutable payload transforms, derived action/resource resolution, RBAC,
+> staged policy and content guardrails, rate limiting, circuit breaking, lifecycle
+> audit evidence, authenticated protected HITL resumption and reconciliation,
+> `ON_DECISION` credit controls, and OpenTelemetry instrumentation. Formal
+> verification, sandbox execution, and the remaining domain analysis tools stay
+> offline. Items that do not exist yet are
+> collected in [Roadmap — not yet implemented](#roadmap--not-yet-implemented) and
+> flagged inline as **(roadmap)**. The gap analysis behind those flags is
+> [`docs/plans/guardrails-realignment.md`](docs/plans/guardrails-realignment.md).
+
+> **Agent authentication boundary.** Secure `GovernanceKernel` mode authenticates opaque workload
+> credentials before observing request data, tracing, registry state, or executor identifiers and
+> derives roles only from the authoritative registry. Protected schema-v2 continuations retain the
+> signed authentication/registry binding across HITL resume. Adapters obtain fresh credentials
+> exactly once per call through a kernel-bound caller before deferred request
+> construction. Optional `agentguard[auth]` supplies a concrete offline RS256 verifier with pinned
+> keys, strict claims, replay prevention, bounded rotation overlap, and emergency revocation.
+> Legacy kernel construction remains an explicitly self-asserted compatibility path.
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -15,11 +36,11 @@ AgentGuard is a **governance middleware** — it does not orchestrate agents; it
 │                    AgentGuard Runtime Middleware                  │
 │  ┌──────────────────────────────────────────────────────────┐   │
 │  │  Layer 1: Security Runtime                                │   │
-│  │  RBAC → Identity → Sandbox → Circuit Breaker → Audit     │   │
+│  │  Identity → RBAC → Limits → Circuit Breaker → Audit      │   │
 │  └──────────────────────────────────────────────────────────┘   │
 │  ┌──────────────────────────────────────────────────────────┐   │
 │  │  Layer 2: Compliance Engine                               │   │
-│  │  Policy Evaluator → HITL Escalation → Report Generator   │   │
+│  │  Runtime Policy → Offline HITL/Verification/Reports       │   │
 │  └──────────────────────────────────────────────────────────┘   │
 │  ┌──────────────────────────────────────────────────────────┐   │
 │  │  Layer 3: Domain Toolkit (Finance / Healthcare / Gov)     │   │
@@ -46,34 +67,141 @@ The security runtime is the load-bearing foundation. Every other layer depends o
 
 ### Execution Flow
 
+`agentguard.guardrails.GovernanceKernel` owns this flow. The five integration
+adapters call `guarded_tool_call`; `agentguard.integrations._pipeline.run_governed`
+is a deprecated compatibility shim that constructs a kernel and delegates to it.
+
 ```
-Agent calls tool
+Agent calls tool/message adapter
        │
        ▼
-1. resolve_identity(agent_id)        → AgentIdentity
+1. resolve_identity; build immutable typed payload
        │
        ▼
-2. check_permission(identity, action, resource)  → PermissionContext
+2. run input transforms; derive and canonicalize action/resource
        │
-       ├── DENIED → write AuditEvent(result="denied") → raise PermissionDeniedError
-       │
-       ▼
-3. evaluate_policies(permission_ctx) → list[PolicyResult]
-       │
-       ├── CRITICAL violation → write AuditEvent(result="denied") → raise PolicyViolationError
-       ├── HITL required → write AuditEvent(result="escalated") → await human_approval()
+       ├── invalid/unresolved → audit denial → raise PermissionDeniedError
        │
        ▼
-4. write AuditEvent(result="allowed", policy_results=...)   ← LOG BEFORE EXECUTION
+3. RBAC → staged pre-policy → pre-tool/message guardrails
+       │
+       ├── deny/escalate → audit terminal decision → raise
        │
        ▼
-5. execute_in_sandbox(tool, args)    → SandboxResult
+4. rate-limit; enter circuit-breaker admission boundary
        │
-       ├── Sandbox error → write AuditEvent(result="error") → raise SandboxError
+       ├── rejected → audit rejection → raise
+       ▼
+5. write invocation:{id}:admission → execute → write invocation:{id}:execution-completed
+       │
+       ├── executor error/cancellation → write execution_completed(error) → re-raise
        │
        ▼
-6. return SandboxResult to agent
+6. post-policy → post-tool/message or on-decision guardrails → write invocation:{id}:delivery
+       │
+       └── delivery_completed | delivery_denied | delivery_escalated
 ```
+
+The guardrail chain has `enforce`, `shadow`, and `off` modes. Only content
+guardrail behavior changes: shadow evaluates the full chain and signs each
+would-be effect without blocking or applying transforms, while off skips the
+chain. Identity, RBAC, policy, rate limiting, circuit breaking, audit, and the
+execution lifecycle remain active in all three modes. Schema-v4 events attach
+input/pre evaluations once to the admission or pre-admission terminal and post
+evaluations once to the delivery terminal; `execution_completed` carries none.
+If cancellation arrives after execution, the kernel commits a `delivery_denied`
+terminal with `DELIVERY.CANCELLED` before re-raising it.
+
+The circuit breaker remains a kernel boundary rather than a guardrail. Its
+`before_execute` callback writes `admission` only after the breaker grants the slot
+and immediately before execution, including the single HALF_OPEN probe. An admitted
+executor always produces `execution_completed`; successful execution is not proof of
+delivery until a delivery terminal is committed.
+
+**Step 5 executes an in-process callable by default.** When a guardrail emits a sandbox
+obligation, the governed PRE_TOOL boundary instead routes the authorized transformed argv through
+the hardened Docker backend; host subprocess backends are rejected. Standalone sandbox helpers
+remain available for offline use.
+
+### Agent Authentication Contracts
+
+`agentguard.core.authentication` defines three async, runtime-checkable protocols without choosing
+a credential mechanism: `AgentCredentialProvider`, `AgentAuthenticator`, and the distinct
+`ControlPlaneAuthenticator`. Authentication returns a frozen `AuthenticatedAgentPrincipal` with
+the trusted `agent_id`, method, authority, SHA-256 credential digest, and UTC validity timestamps.
+It intentionally has no roles or capabilities. `ControlPlanePrincipal` uses a separate principal
+identifier and immutable capabilities so future registry administration cannot reuse the agent
+trust domain.
+
+`AuthenticationFailure` supplies the reserved machine-stable classifications
+`AUTH.CREDENTIAL_MISSING`, `AUTH.CREDENTIAL_INVALID`, `AUTH.CREDENTIAL_EXPIRED`,
+`AUTH.CREDENTIAL_NOT_YET_VALID`, `AUTH.CREDENTIAL_REPLAYED`, `AUTH.CREDENTIAL_REVOKED`, `AUTH.PRINCIPAL_MISMATCH`,
+`AUTH.IDENTITY_INACTIVE`, `AUTH.PROVIDER_FAILURE`, and `AUTH.INTERNAL_ERROR`.
+`AuthenticationError` exposes only one of those classifications; it has no raw-error or credential
+detail channel.
+
+Schema v7 adds frozen, typed `AuthenticationEvidence` for `authentication_succeeded` and
+`authentication_rejected` events. Verified evidence contains only credential-derived identity,
+validity, digest, and optional registry revision. Rejected evidence contains a failure
+classification and digest but forbids trusted identity fields, credential validity timestamps,
+and registry metadata. Rejected-event producers reserve `__unauthenticated__` as the outer audit
+actor; they must not copy a claimed actor ID into signed evidence. The schema-v7 HMAC serializer is
+domain-separated from v1-v6, and verification keeps each frozen v1-v6 canonical serializer intact.
+
+`agentguard.core.jwt_authentication` implements those contracts for one exact RS256 workload trust
+domain. `JwtAgentAuthenticator` accepts only bounded compact JWTs with exact issuer/audience,
+canonical subject and token ID, integer short-lived time claims, fixed local `kid` selection, and
+operator-pinned public RSA JWKs. It rejects token-provided key material and URLs, performs no OIDC
+discovery or request-path network I/O, and runs bounded cryptographic verification in worker
+threads. `CredentialUseStore` atomically enforces one-use token IDs and issuer/key/subject/token/
+digest revocation; `JwtKeySetProvider` supplies immutable snapshots. Their bundled implementations
+are bounded and process-local, so multi-process deployments must inject shared atomic backends.
+Replay backends own their serialized, nondecreasing trusted clock; the consume protocol accepts no
+caller-supplied current time. Key-overlap duration uses a monotonic clock and drops prior keys if
+that clock's contract is violated.
+Key/subject revocation must be paired with authoritative-registry credential rotation or identity
+revocation when protected continuations must also be invalidated.
+
+### Authoritative Registry and Administrative Control Plane
+
+`agentguard.core.registry` defines the read boundary. An `AgentRegistryRecord` is deeply immutable
+and contains registry-owned name, roles, metadata, active/revoked status, credential epoch, record
+revision, and UTC lifecycle timestamps. A full `AgentRegistrySnapshot` binds those records to one
+monotonic global registry revision. Registration starts at record revision and credential epoch 1;
+every committed mutation advances the global and target record revisions, role replacement retains
+the credential epoch, and credential rotation or revocation advances it. Revoked records remain
+available to administrative reads but cannot resolve as active identities.
+
+`AgentRegistryControlPlane` is distinct from the workload-agent trust domain. Each register,
+replace-role, credential-rotation, or revocation call accepts an opaque credential and invokes the
+injected `ControlPlaneAuthenticator` before observing registry state. `RoleGrantPolicy` requires an
+exact action capability plus exact, separately configured grant/revoke capabilities for every role
+change; wildcard capabilities are invalid. The control plane prepares an immutable proposed state,
+writes and reads back the exact signed authorization event, and only then commits. Its operation
+ledger moves `PREPARED` → `AUDITED` → `COMMITTED` or `CONFLICTED`. Stable operation IDs make an
+identical principal/request retry idempotent and reject reuse with different authority or content.
+Cancellation is drained through the audit-and-commit boundary before it propagates.
+
+`InMemoryAuthoritativeAgentRegistry` provides process-local state. The local POSIX
+`SignedFileAuthoritativeAgentRegistry` persists the full record and operation ledger as canonical
+JSON under a separate `agentguard.registry.state.v1` HMAC domain. A chained local checkpoint handles
+atomic crash windows; the required `trusted_checkpoint_path`, which must be outside the registry
+directory, supplies the monotonic restart anchor. It requires owner-controlled 0700 directories and
+0600 owner-only regular state, checkpoint, and lock files with one hard link; uses `O_NOFOLLOW`,
+`flock`, unique temporary files, file `fsync`, atomic replacement, and directory `fsync`; and runs
+those blocking transactions in worker threads. Both registry implementations re-read their own
+configured audit sink before commit. Opening the signed store additionally requires a
+checkpoint-capable audit sink, verifies the persisted audit-head prefix, cross-binds every
+post-audit operation to its exact signed event, and recovers one-step state/checkpoint and
+`PREPARED`/`AUDITED` crash windows. Rolling back both registry-directory files is rejected while the
+trusted checkpoint remains current. Coordinated rollback of the registry directory, trusted
+checkpoint failure domain, and audit/checkpoint files remains outside this local boundary; this is
+not a multi-host coordinator.
+
+`AgentRegistry` and `FileBackedRegistry` in `core.identity` remain compatibility-only. They accept
+self-asserted registration, do not authenticate administration, and persist unsigned JSON. Only an
+explicitly legacy kernel uses that resolver; secure construction requires the authoritative
+registry and authenticator together and never falls back.
 
 ### RBAC Model
 
@@ -100,19 +228,22 @@ Permission resolution uses **deny-override**: if any matching permission has `ef
 
 ### Sandbox Design
 
-Two execution backends (pluggable via `SandboxBackend` protocol):
+Two execution backends are available through the `SandboxBackend` protocol. Both take a
+`list[str]` command and return a `SandboxResult`; only the hardened Docker backend is accepted for
+governed sandbox obligations. The in-process callable remains the default when no obligation is
+emitted.
 
-**Docker backend (default):**
-- Each tool execution runs in a fresh container based on a minimal image
-- Network access is opt-in per tool definition
-- File system access is restricted to a mount-per-call temporary volume
-- CPU and memory limits enforced via Docker resource constraints
-- Execution timeout: configurable per tool, default 30 seconds
+**`DockerSandboxBackend`:**
+- Each execution runs in a fresh container from a caller-supplied image
+- Applies `network_disabled`, read-only non-root execution, dropped capabilities,
+  no-new-privileges, quotas, daemon log rotation, and bounded streaming capture
+- Execution timeout, default 30 seconds
+- Per-call volume mounts are intentionally unsupported; the governed command is the authorized
+  transformed argv.
 
-**Wasm backend (lightweight, optional):**
-- Uses `wasmtime-py` for near-native sandboxing without Docker overhead
-- Suitable for pure-Python tools with no system call requirements
-- Faster cold start; lower isolation guarantee than Docker
+**`NoOpSandboxBackend`:**
+- Direct `asyncio.create_subprocess_exec` with timeout enforcement, no isolation
+- Development and testing only; never `shell=True`
 
 ### Audit Log
 
@@ -122,18 +253,104 @@ Append-only, tamper-evident log using HMAC chain:
 AuditEvent N:  { ...event data..., prev_hash: HMAC(event N-1), hash: HMAC(event N) }
 ```
 
-Storage backends (pluggable):
-- **File** (default): JSONL file, rotated daily, compressed
-- **S3/GCS**: for production deployments
-- **PostgreSQL**: optional, via `agentguard[postgres]` install
+Applications depend on the `AuditLog` protocol. `AppendOnlyAuditLog` provides local
+versioned HMAC evidence through `FileAuditBackend`; `SigningAuditBackend` is a keyless client
+for `AuditCollectorServer` over an owner-only Unix socket. Remote cloud and database
+backends remain roadmap items; there is no `agentguard[postgres]` extra.
 
 The audit log is never the first place a write fails. If the log write fails, the action is blocked.
+
+Schema v3 sequence numbers and signed head checkpoints detect tail truncation when a
+trusted checkpoint is retained outside the log/checkpoint failure domain. Collector
+mode separates signing-key custody and ordering from the agent process. Symmetric HMAC
+still does not prove event truth or provide public third-party verification, and a
+same-UID compromise of both failure domains remains outside the collector boundary.
+
+#### Rollback witness trust boundary
+
+`audit-head.json` lives inside the audit directory, and `AuditCollectorServer`'s signed
+state lives beside it on the same host. An attacker with root can restore both together,
+so neither proves the log was not rewound. The only artifact that can prove it is a
+**checkpoint replicated off-host**: `agentguard audit export-checkpoint` writes the signed
+head, and `agentguard audit verify --trusted-checkpoint` (or
+`AppendOnlyAuditLog(trusted_checkpoint=...)`) refuses a log that no longer reaches it,
+raising `AuditRollbackDetectedError`. A collector configured with
+`trusted_checkpoint_path=` — which must resolve outside both the audit and collector-state
+directories — refuses to start behind that witness and advances it after every committed
+checkpoint, so replicating the file off-host is a file-copy problem rather than a code one.
+
+What this detects: in-place edits and reordering (HMAC chain), tail truncation
+(sequence + local checkpoint), and a rollback to any head older than the last exported
+witness, including one that restores the audit directory and collector state together.
+
+What it does **not** detect: a rollback to a state *newer* than the last witness that
+reached off-host storage — the window between exports is unwitnessed; a same-host copy of
+the witness, which shares the attacker's reach and proves nothing; forged event content
+signed with a compromised key; and event truth, since HMAC binds who wrote a record, not
+whether the record describes reality. Export frequency sets the size of the undetectable
+window, and the witness must be replicated to storage the audit host cannot write.
+
+#### Signing-key epoch continuity
+
+`AGENTGUARD_AUDIT_KEY` supplies epoch 1. `AGENTGUARD_AUDIT_KEYS` optionally declares later
+epochs as a JSON object mapping `key_id` to `{"key": ..., "activation_sequence": ...}`,
+subject to the same >=32-byte floor. This declaration is what makes rotation survivable:
+key bytes exist only in the environment, so an epoch the environment does not declare
+cannot be rebuilt after a restart and every event signed under it becomes unverifiable.
+`AuditCollectorServer.rotate_key` therefore refuses to activate an undeclared epoch on an
+environment-sourced keyring (`AuditKeyRotationRefusedError`) rather than opening that
+one-way door; a caller-injected keyring owns its own continuity and still rotates in place.
+
+The declaration is **unauthenticated** — an epoch is trusted because it appears in the
+environment, not because anything signed it. Write access to the process environment is
+therefore equivalent to audit-key custody: whoever can set `AGENTGUARD_AUDIT_KEYS` can
+introduce a signing epoch and forge events that verify under it. This is not a new
+boundary (`AGENTGUARD_AUDIT_KEY` is read from the same place), but it does mean the
+variable must be protected exactly as the key is. To keep an environment edit from
+silently becoming durable, a restart that sees newly declared epochs refuses to start
+unless the operator passes `adopt_declared_epochs=True`; adoption then commits them into
+signed state only as a strict suffix extension whose activations fall after the committed
+head, so no already-signed event can be reinterpreted. Binding declarations to the
+predecessor epoch with an activation certificate would close the trust gap and remains
+open.
+
+New writes use schema v8. Its domain-separated canonical envelope signs typed
+`RegistryMutationEvidence` in addition to the v4 guardrail, v5 HITL, v6 reconciliation, and v7
+authentication extensions. Authorized registry evidence binds the authenticated administrator,
+capability and request digests, proposed revisions, record digests, credential epochs, and prepare
+time; rejected evidence signs the canonical `REGISTRY.*` reason without asserting prepared state.
+Verification retains exact schema-specific v1-v7 serializers, so the new evidence does not rewrite
+or reinterpret historical signed bytes. Registry evidence on a pre-v8 record is rejected as an
+unsigned extension.
 
 ---
 
 ## Layer 2: Compliance Engine
 
-The compliance engine evaluates a set of YAML-defined policy rules against every `AuditEvent`. It is separate from RBAC (which is about *who can do what*) — compliance is about *whether what was done meets regulatory standards*.
+The compliance engine evaluates a set of YAML-defined policy rules against `AuditEvent`
+records. It is separate from RBAC (which is about *who can do what*) — compliance is
+about *whether what was done meets regulatory standards*.
+
+Schema-v2 `pre_tool`, `post_tool`, `pre_message`, and `post_message` rules run in the
+kernel against the transformed input or actual result. Each rule has an explicit
+`allow | deny | escalate | warn` effect; severity does not determine enforcement.
+Attestation-stage rules remain offline evidence checks used by the CLI and
+`ComplianceReporter`. When an `EscalationStore` is configured, the runtime persists
+metadata-only pending state and a token verifier before signing schema-v5
+`escalation_requested` evidence and blocking the call. Protected registered PRE calls and
+guardrail-triggered POST delivery support authenticated approval/resumption; an optional execution
+journal adds signed-marker recovery and checkpoint-attested unknown-window classification for
+claimed protected continuations.
+See [`docs/compliance/index.md`](docs/compliance/index.md) for the exact bundle split.
+
+`PolicyEngine` publishes recursively immutable, SHA-256-addressed `PolicyBundle`
+snapshots. `await engine.reload()` serializes reload requests, rebuilds and validates
+configured YAML off the event loop, then swaps the complete bundle under a short lock. There is no implicit file
+watcher. Invalid YAML, unknown checks, or duplicate rule IDs leave the last-known-good
+bundle active. The kernel pins one snapshot before its first await, so pre- and
+post-execution policy stages and every signed lifecycle event use one version even when
+a reload completes during execution. Activated generations remain resolvable in memory
+for reporting; evidence from an unknown generation is non-attestable.
 
 ### Policy Rule Schema
 
@@ -173,10 +390,13 @@ The compliance engine evaluates a set of YAML-defined policy rules against every
 - OWASP-AGENT-09: Insecure Output Handling
 - OWASP-AGENT-10: Model Denial of Service
 
-**FINOS AIGF v2.0** (`policies/finos_aigf_v2.yaml`):
-- 46 risks mapped across: Governance, Risk Management, Technology, Operations
-- Key risk IDs: FINOS-AIGF-001 (Model Risk) through FINOS-AIGF-046 (Vendor Concentration)
-- Maps to SR 11-7 (Fed model risk management guidance) requirements
+**FINOS AIGF v2.0-aligned controls** (`policies/finos_aigf_v2.yaml`):
+- 15 controls informed by FINOS AIGF v2.0, spanning Governance, Risk Management,
+  Technology, and Operations themes
+- Rule IDs are AgentGuard-local (`AG-FINOS-NNN`); this is **not** an official mapping
+  to the FINOS risk registry (`AIR-*` IDs). An official mapping requires domain review.
+- Several controls retain historical SR 11-7 model-risk themes; SR 26-2 superseded that guidance
+  in April 2026, and the shipped controls are not regulatory attestations
 
 **EU AI Act** (`policies/eu_ai_act.yaml`):
 - Annex III High-Risk AI: credit scoring (Article 6)
@@ -188,21 +408,79 @@ The compliance engine evaluates a set of YAML-defined policy rules against every
 
 ### Human-in-the-Loop Escalation
 
-HITL is triggered when:
-1. A policy rule has `requires_human_approval: true`
-2. A circuit breaker threshold is approaching (warning zone)
-3. An action is in an agent's `escalation_required` scope
-
-HITL implementation is **callback-based** — AgentGuard provides the escalation event; the caller provides the approval handler:
+HITL implementation is **callback-based** — `HitlManager` builds a `HitlEscalation` and
+hands it to a handler you supply, which returns an `ApprovalDecision`:
 
 ```python
+from agentguard.compliance.hitl import ApprovalDecision, HitlEscalation, HitlManager
+
+
 async def my_approval_handler(escalation: HitlEscalation) -> ApprovalDecision:
     # Send to Slack, PagerDuty, internal workflow system
-    # Return ApprovalDecision(approved=True/False, approver_id="...", reason="...")
-    ...
+    return ApprovalDecision(approved=True, approver_id="...", reason="...")
 
-guard = AgentGuard(hitl_handler=my_approval_handler)
+
+manager = HitlManager(handler=my_approval_handler)
 ```
+
+`GovernanceKernel` can produce an escalation from an explicit policy effect or guardrail
+decision. Without a store it preserves legacy non-resumable behavior. Metadata-only requests also
+remain available for caller-supplied executors. For a trusted executor selected through
+`guarded_registered_tool_call`, an enforced PRE_TOOL/PRE_MESSAGE guardrail escalation can reserve
+state, seal the exact continuation through an injected `ContinuationProtector`, attach only the
+opaque envelope, commit schema-v5 request evidence, and then return the verifier-backed token.
+
+`decide_escalation` authenticates credentials through an injected `ApproverAuthenticator`; the
+approver ID is never accepted from request data. It prepares the decision, writes stable
+`approval_granted`/`approval_denied` evidence with `write_once`, and only then activates it.
+`resume_tool_call` accepts no payload or executor. Before claim it verifies the complete
+restart-resumable chain and cursor, restores and pins the exact protected policy snapshot, resolves
+the complete executor reference and current agent, rechecks RBAC, and constructs evidence. The
+atomic claim persists a stable claim ID/timestamp. Resume then continues after every guardrail whose
+approval is authenticated in the cursor; a later unapproved escalation still stops and creates a
+new request. Denial, expiry, revoked RBAC, and ordinary pre-admission cancellation each commit one
+stable `delivery_denied`. Policy reload invalidates an outstanding continuation at validation and
+can never substitute a different bundle during an accepted resume. INPUT resume needs a trusted
+resolver registry. Guardrail-triggered POST_TOOL/POST_MESSAGE/ON_DECISION escalations instead seal
+the completed `ToolResultPayload` or `DecisionPayload`, exact post cursor, full chain identity, and
+pinned policy bundle. Approval claims delivery ownership and resumes only the remaining post chain;
+it never resolves or invokes an executor. Linked decision continuations use schema v3 to retain
+opaque subject/relationship references and an allowlisted redacted-evidence projection; exact
+schema-v1/v2 serialization remains unchanged.
+
+Applications can additionally inject an `ExecutionJournal` into `GovernanceKernel`. This opt-in,
+process-safe store signs claim-state metadata and seals an exact successful executor outcome before
+post-processing. Its reconciliation APIs authenticate the caller through the same
+`ApproverAuthenticator` and require `hitl:reconcile`; none accepts a replacement result, payload,
+executor, executor ID, or disposition. `assess_execution` classifies only from authenticated
+store/journal state and `AuditLog.read_verified(require_checkpoint=True)`, so a missing event is
+treated as evidence only when a committed checkpoint attests the audit head.
+
+If the journal contains a protected result, `reconcile_known_outcome` completes any missing stable
+`execution_completed` audit and resumes post-processing without resolving or invoking an executor.
+If execution may have crossed the admission boundary without a protected result, or POST delivery
+was already claimed without a terminal, the journal records `IN_DOUBT`; `deny_in_doubt` is the only
+generic resolution and commits a stable delivery denial. This is crash-window convergence for
+claimed protected PRE/POST continuations, not a general exactly-once execution facility. Legacy
+caller-supplied executors, policy-only escalations, and INPUT escalations remain outside the
+resumable/reconciliation protocol.
+
+Journaled executor exceptions, cancellations, and invalid outputs close through the stable
+`invocation:{id}:delivery` denial and durable `DELIVERY_DENIED` journal state. Repeated cancellation
+is drained until both audit and journal terminals finish, then `CancelledError` propagates. For a
+successful result, `POST_PROCESSING_CLAIMED` is atomically persisted before the kernel writes either
+the stable `execution_post_processing_claimed` marker
+(`invocation:{id}:post-processing-claimed`) or the authenticated
+`execution_reconciliation_resumed` marker. Policy and guardrail callbacks do not begin before that
+marker is committed. A crash between the journal claim and its marker therefore fails closed as
+`IN_DOUBT` instead of replaying POST work.
+
+Recovery also compares verified audit markers with signed journal state. A stable claim marker
+prevents POST callbacks from running when an older but valid signed journal record is restored; a
+stable delivery marker repairs a lagging/rolled-back journal terminal or reports a state conflict.
+These positive marker checks use verified signed history and do not require an external checkpoint;
+checkpoint-attested absence is required only when missing lifecycle evidence is used to classify an
+unknown window.
 
 ### Formal Policy Verification (Z3 SMT Solver)
 
@@ -225,117 +503,196 @@ Prove: ∀ rules r₁, r₂ ∈ policy_set:
 ```
 Detects contradictions and redundant rules before deployment.
 
-**Property 3 — Workflow Safety (µZ fixed-point engine):**
+**Property 3 — Workflow Safety:**
 ```
-Prove: ∀ execution paths P in agent graph G:
+Check: ∀ execution paths P in agent graph G:
   (node_with_role(X) ∈ P) ∧ (tool_requiring(Y) ∈ P)
   → ∃ hitl_node ∈ P between them
 ```
-Uses Z3's Datalog/µZ engine for reachability queries on directed graphs.
+`verify_workflow_safety` implements this as a **breadth-first search over the directed
+graph** — it contains no Z3 at all (ADR-016). It is a graph check, not a proof, and it
+is exposed through the Python API only; there is no `verify` CLI subcommand for it.
 
-**Property 4 — Credit Model Monotonicity (for credit risk domain):**
-```
-Prove: ∀ input pairs (x₁, x₂) where x₁.income > x₂.income ∧ all_else_equal:
-  credit_score(x₁) ≥ credit_score(x₂)
-```
-Encodes model decision boundaries as piecewise-linear Z3 arithmetic formulas.
-
-**Property 5 — Adverse Action Determinism:**
-```
-Prove: ∀ applicant profiles p where p₁ = p₂:
-  adverse_action_reasons(p₁) = adverse_action_reasons(p₂) (same set, same order)
-```
+Properties 4 (credit model monotonicity) and 5 (adverse action determinism) are
+**roadmap** — no monotonicity or determinism encoding exists in `agentguard/`.
 
 All verification results produce a `VerificationResult` with status `sat | unsat | timeout | unknown`. When SAT (property violated), Z3's counterexample is translated back to human-readable AgentGuard terms. Verification timeout defaults to 10 seconds.
 
 ```bash
-# CLI usage
+# CLI usage — these two subcommands are the whole `verify` group
 agentguard verify rbac --config rbac_config.yaml
-agentguard verify workflow --graph agent_graph.json --property no-pii-without-hitl
-agentguard verify policy --file policies/finos_aigf_v2.yaml --check consistency
-agentguard verify model --module credit_scorer --property monotonicity --feature income
+agentguard verify policy --policy-dir agentguard/compliance/policies
 ```
+
+One soundness caveat applies to what ships today, tracked in Phase 5.2: the
+policy-consistency encoding treats rule conditions as unconstrained strings, which
+makes the satisfiability question close to vacuous — treat it as a lint-grade signal,
+not a proof. The RBAC encoding no longer shares this caveat: it models `fnmatch`
+subsumption as Z3 regexes and flattens role inheritance exactly as the runtime does,
+with a differential test against `RBACEngine`.
 
 ---
 
 ## Layer 3: Credit Risk Domain Toolkit
 
-### Credit Decisioning Agent Template
+### Governed Credit Decisions
 
-A pre-built, AgentGuard-wrapped agent graph for automated credit decisioning workflows:
+`CreditDecisionPolicy` is a pure, synchronous, side-effect-free PD-band policy. Its frozen,
+versioned configuration accepts only finite thresholds in `[0, 1]`, and its only outcomes are
+`approve`, `review`, and `decline`. It does not log applicant data, fabricate model reasons, or
+perform authorization.
 
-```
-Application Received
-      │
-      ▼
-[bureau_pull_tool]           ← sandboxed, RBAC: requires "credit:read:bureau"
-      │
-      ▼
-[income_verification_tool]   ← sandboxed, RBAC: requires "credit:read:income"
-      │
-      ▼
-[pd_model_tool]              ← sandboxed, model inference (PD score)
-      │
-      ├── PD < 5%:  AUTO_APPROVE
-      ├── PD 5–20%: ANALYST_REVIEW (HITL escalation) → underwriter decision
-      └── PD > 20%: AUTO_DECLINE → [adverse_action_tool]
-                                        │
-                                        ▼
-                               [adverse_action_generator]
-                               ECOA/Reg B compliant notice
-                               with deterministic reason ordering
-```
-
-**Formal verification hook:** Before deployment, `agentguard verify workflow` proves that:
-- No application can be auto-declined without the adverse action generator running
-- No PII leaves the sandboxed bureau pull without being masked in the audit log
-- The decision boundary is monotone with respect to FICO score and DTI ratio
-
-### Adverse Action Notice Generator
-
-ECOA and Regulation B require that when credit is denied (or offered on less favorable terms), the applicant receives a notice stating the specific principal reasons. The `AdverseActionGenerator`:
-
-- Accepts the PD model's feature importance output
-- Ranks adverse factors by contribution magnitude
-- Maps model features to consumer-readable reason codes (FCRA-standardized where applicable)
-- Ensures deterministic ordering (verified by Z3 property 5)
-- Produces `AdverseActionNotice` Pydantic model with: applicant_id, decision, reasons (ordered list), creditor_info, disclosure_text
-
-### SR 11-7 Model Validation Agent
-
-Federal Reserve / OCC SR 11-7 guidance requires banks to independently validate AI/ML credit models. The validation agent automates parts of this workflow:
+`GovernedCreditAgent` is the runtime orchestration boundary. It sends every score, decision,
+override, and notice record through `GovernanceKernel` with a fixed action:
 
 ```
-Model Validation Request
+trusted scorer ── model:score ──► CreditModelScore
+                                      │
+                                      ▼
+                              CreditDecisionPolicy
+                                      │
+                 ┌────────────────────┼────────────────────┐
+                 ▼                    ▼                    ▼
+        decision:approve      decision:review      decision:decline
+                                      │                    │
+                       HITL.REVIEW_BAND             notice:issue
+                                      │                    │
+                         sealed review delivery     completed-notice record
+                                      │
+                                      └── separate decision:override
+```
+
+The scorer callback runs under `model:score`. A returned `DecisionPayload` is preserved rather
+than wrapped as a generic tool result, so policy and the mixed action-scoped guardrail chain run at
+`ON_DECISION` inside the existing authentication, RBAC, limiter, breaker, audit, shadow, and
+protected POST lifecycle. The decision controls validate the typed envelope, protected-feature
+schema, exact trusted model/version evidence, decision band, decline reason taxonomy, and exact
+attribution-to-reason mapping. Notice issuance has its own completeness control.
+
+A review-band result escalates with `HITL.REVIEW_BAND`. Approval resumes only the sealed
+post-execution review result and never reruns scoring or policy evaluation. That generic approval
+is not an approval or decline of credit. A final underwriter outcome requires a separately
+authorized `decision:override` call linked to the review escalation.
+
+The kernel signs only allowlisted redacted evidence: domain-separated hashes of application,
+decision, model, policy, and notice identifiers plus the minimum decision or notice metadata.
+Applicant data, raw identifiers, PD values, feature names/values, contributions, reason text, and
+notice bodies remain outside signed audit payloads and continuation metadata. A full decision is
+available to in-process controls and, when escalated, sealed inside the protected continuation.
+`notice:issue` records an already-completed written notification; rendering alone is not delivery. The offline
+`find_unresolved_declines` correlator requires checkpoint-attestable audit history and reports a
+delivered decline without a later, timely, exactly linked delivered notice as
+`AA.UNRESOLVED_DECLINE`.
+
+The current governed notice-recording slice accepts final decline candidates paired with a
+`DeniedApplicationNotice` or `CounterofferNonAcceptanceNotice`. Phase 4.3's other artifact types
+remain constructible/renderable but are not accepted by this recording boundary.
+
+### Non-Model Principal Reasons
+
+Regulation B requires a notice to state the decline's actual principal reasons, and not every
+decline is a model decline. A candidate can therefore carry two further reason bases, each bound to
+this application and decision so it cannot be lifted from another file:
+
+- A `PolicyDenialSelection` is produced only by evaluating a versioned `CreditPolicyBundle` over the
+  complete declared fact schema. It carries the facts it was computed from, so
+  `PolicyReasonIntegrityGuardrail` — holding the same bundle — recomputes every finding and denies
+  `AA.POLICY_REASON_UNBOUND` on any drift, including a denial that omits a rule which also fired. A
+  bundle denial is a hard cutoff: it declines whatever band the PD falls in.
+- A `ReviewJudgment` records a reviewer's own codes, drawn from the same versioned ECOA registry,
+  against the escalation whose completed review lineage `verify_review_escalation` attests.
+  `ReviewReasonIntegrityGuardrail` admits it only on a `decision:override` decline naming that
+  application, decision, and taxonomy, and denies `AA.REVIEW_REASON_UNBOUND` otherwise; `override`
+  additionally refuses a judgment citing an escalation other than the one being reviewed.
+
+`PrincipalReasonSelection.from_decision_basis` composes a mixed notice in decision chronology —
+policy rules, then model reasons, then reviewer judgment — preserving each producer's own
+deterministic order within its basis and stating a code shared by two bases once, from the earlier
+one. A decline with no basis at all still fails closed, and the notice control accepts only the
+selection recomputed from the decision's own bases, so a human decline can never be signed by
+restating the model's reasons.
+
+**Roadmap — formal verification hook.** Model monotonicity and an adverse-action ordering proof
+are not implemented. Runtime reason and notice controls enforce concrete evidence contracts, but
+they do not constitute those formal proofs.
+
+### Adverse Action Attribution and Notice Artifacts
+
+ECOA and Regulation B require specific principal reasons for covered adverse actions. The current
+Phase 4.1/4.2/4.3 boundary produces truthful reason evidence, complete typed credit-notice
+artifacts, deterministic source-grounded text renderings, and governed PII-free issuance evidence.
+It does not transport notices or place applicant data in the audit chain. The implementation:
+
+- Derives strictly positive contributions from an explicit scorecard or coefficient reference and
+  declared direction; it rejects ambiguous feature-importance dictionaries.
+- Preserves model ID, model version, reference ID, method, and the complete evaluated feature
+  schema, including favorable and zero factors.
+- Requires an exact deployer feature binding to a versioned ECOA reason vocabulary and keeps
+  deployer-supplied FCRA bureau factors in an independent registry and namespace.
+- Consolidates features mapped to one reason and ranks them deterministically by summed adverse
+  contribution and stable local code.
+- Produces immutable denied, counteroffer, incomplete-application, and withdrawal artifacts with
+  creditor/applicant details, fixed-version ECOA text, discriminated FCRA source regimes, and
+  actual-notification timing.
+- Renders eligible Appendix C C-1/C-3/C-4/C-6 or standalone-counteroffer profiles to canonical
+  UTF-8/LF text and hashes the exact bytes. Rendering is deterministic and is not a delivery event.
+- Records already-completed written notification through `notice:issue` with opaque application,
+  decision, notice, and model links plus the exact body digest; it does not treat rendering as
+  notification.
+
+### Model Validation Evidence and Signed Live Handoff
+
+AgentGuard models the conceptual-soundness, ongoing-monitoring, outcomes-analysis, effective-
+challenge, and remediation themes associated with historical SR 11-7. The Federal Reserve's
+[SR 26-2](https://www.federalreserve.gov/supervisionreg/srletters/SR2602.htm) superseded SR 11-7
+on April 17, 2026, and [OCC Bulletin 2026-13](https://www.occ.gov/news-issuances/bulletins/2026/bulletin-2026-13.html)
+rescinded OCC Bulletin 2011-12. The current guidance is principles-based and non-prescriptive;
+neither generation mandates AgentGuard's report schema, Gini/AUC metrics, formula, or thresholds.
+These are versioned project/institution policy choices, not a legal attestation.
+
+```
+Typed Validation Evidence
       │
-      ├── [conceptual_soundness_tool]   — methodology review checklist
-      ├── [data_quality_tool]           — training/validation data analysis
-      ├── [performance_metrics_tool]    — Gini, KS, AUC, PSI, vintage analysis
-      ├── [fairness_analysis_tool]      — disparate impact (4/5ths rule), equalized odds
-      └── [documentation_review_tool]  — model documentation completeness
-                    │
+      ├── exact-model backtest and optional same-sample challenger
+      ├── aggregate-only private fairness-monitor binding
+      ├── versioned thresholds and freshness policy
+      └── immutable owned findings and closure evidence
                     ▼
-           ModelValidationReport
-           (SR 11-7 section mapping)
+       revisioned ModelValidationReport
+                    ▼
+       domain-separated HMAC envelope
+                    ▼
+ exact-model report source → verifying evidence provider
+                    ▼
+       ModelProvenanceGuardrail
 ```
 
-### WGAN-GP Synthetic Credit Data Generator
+The signer refuses incomplete compatibility reports. The verifying provider checks the canonical
+report reference, signature, exact model/version, contiguous predecessor lineage, source identity,
+internal status, feature schema, fairness binding, and validity window. Any source, verification,
+future-date, expiry, or binding failure produces no authorizing evidence. The in-memory source is
+process-local; deployments own durable rollback resistance and HMAC key custody/rotation.
 
-Architecture for tabular credit application data generation:
+### WGAN-GP Synthetic Benchmark Generator
+
+The optional WGAN-GP helper lives under `agentguard.testing` because it generates benchmark data,
+not production model inputs. It accepts a finite rectangular numeric matrix and persists a frozen
+population standard scaler:
 
 ```
-Generator G:  noise(z) ⊕ condition(label) → [FC → BN → LeakyReLU] × 3 → synthetic_application
+Generator G:  noise(z) → [FC → BN → LeakyReLU] × 3 → standardized numeric row
 Critic D:     real/fake_application → [FC → LayerNorm → LeakyReLU] × 3 → scalar
 
 Training:
   - Gradient penalty λ=10 (Gulrajani et al. 2017)
   - Optimizer: Adam(lr=1e-4, β1=0.5, β2=0.9)
   - Critic steps per generator step: 5
-  - Conditional generation: condition on default label for controlled class distribution
-  - Mode collapse detection: MMD metric between real and synthetic marginal distributions
+  - Explicit seeded CPU generators for reproducible training and sampling
+  - Evaluation-mode generation with `no_grad`, scaler inversion, finite-value checks, and
+    named feature bounds (FICO `[300, 850]`)
 ```
 
-Output schema for `synthetic_credit_applications_v1` dataset:
+Output schema for the statistical `synthetic_credit_applications_v1` dataset:
 ```
 application_id, fico_score, dti_ratio, ltv_ratio, annual_income,
 employment_status, loan_purpose, loan_amount, term_months,
@@ -346,23 +703,39 @@ is_default [label]
 
 ### Fairness Analysis Tools
 
-- **Disparate impact test (4/5ths rule):** `approval_rate(protected_group) / approval_rate(majority_group) ≥ 0.8`
-- **Equalized odds:** True positive and false positive rates equal across demographic groups
-- **Calibration:** Predicted PD matches observed default rate within confidence intervals across score bands
-- **Counterfactual fairness:** Verify decision does not change when protected attributes are swapped, all else equal
+- **Disparate impact (four-fifths rule):** explicitly named disadvantaged/reference approval-rate
+  ratio, with a descriptive Katz interval and pooled z or exact Fisher comparison.
+- **Equalized odds:** decline is the adverse prediction; matured default and non-default samples
+  supply separately size-gated true-positive and false-positive rates.
+- **Calibration:** fixed-width predicted-PD deciles expose group ECE without substituting one
+  aggregate mean PD.
+- **Rolling monitoring:** checkpoint-attested final decision evidence is joined to protected group,
+  PD, and matured outcomes only through a trusted private provider; reports retain aggregates and
+  audit-head provenance, not private rows.
 
-All fairness computations use synthetic demographic proxies from the dataset — never infer real demographics from applicant data.
+The library never infers demographics. The bundled demo uses explicitly synthetic proxies; real
+deployments must supply appropriately governed group observations and establish their own legal,
+privacy, sampling, and monitoring policy.
 
 ### PII Detection and Masking
 
-Pattern library covers:
+The framework-independent detector in `agentguard.guardrails.content` recursively
+inspects immutable message, tool-call, and tool-result payloads. The default input
+guardrail masks detected PII before authorization/execution evidence is built; the
+default egress guardrails deny delivery of detected PII or secrets. The finance
+`pii` module remains a compatibility/preset boundary over the same mechanics.
+
+The generic pattern library covers:
 - SSN: `\d{3}-\d{2}-\d{4}` and variants → masked as `XXX-XX-####` in logs
 - Account numbers: 8–17 digit sequences in financial context → last 4 digits only
 - Routing numbers: 9-digit ABA format → fully masked
 - DOB: multiple date format patterns → masked
-- Full name + address combination → combination triggers masking even if individual fields do not
+- Email and formatted/bare phone numbers → masked
 
-FCRA-regulated data (credit report contents, tradeline details) is treated as Category 1 PII regardless of format.
+Structured values are normalized and recursively scanned. Raw matches are excluded
+from `PiiMatch`; evidence stores only redacted values plus a digest of the runtime
+payload. FCRA/GLBA-specific categories remain finance-layer presets and require the
+application to represent them in inspectable payload fields.
 
 ---
 
@@ -371,8 +744,8 @@ FCRA-regulated data (credit report contents, tradeline details) is treated as Ca
 Layer 4 provides three complementary surfaces that all read from the same
 audit log so there is no second source of truth:
 
-1. **`AgentTracer`** — OpenTelemetry spans emitted during the governance
-   pipeline (live, real-time).
+1. **`AgentTracer`** — OpenTelemetry spans emitted by the governance kernel
+   (live, real-time).
 2. **`ReplayDebugger`** — filter and reconstruct historical audit events
    into decision timelines (post-hoc, offline).
 3. **`MetricsDashboard`** — aggregate KPIs (denial rate, latency
@@ -380,18 +753,50 @@ audit log so there is no second source of truth:
 
 ### OpenTelemetry Semantic Conventions
 
-AgentGuard defines custom span attributes under the `agentguard.*` namespace:
+AgentGuard defines custom span attributes under the `agentguard.*` namespace.
+
+**Emitted today.** A governed call produces a root `agentguard.tool_call` span covering
+identity resolution through terminal delivery. It includes:
 
 ```
-agentguard.agent.id              string   UUID of the acting agent
+agentguard.agent.id              string   The acting agent's id
+agentguard.tool.action           string   Resolved tool/action (fallback before resolution)
+agentguard.tool.resource         string   Derived canonical resource or <unresolved>
+agentguard.result                string   allowed | denied | escalated | rejected | error
+agentguard.denial.reason         string   Denial detail when denied
+agentguard.reason_codes          string[] Stable escalation reason codes
+```
+
+The root contains `agentguard.rbac_check`, `agentguard.policy_eval`, and
+`agentguard.tool_execution`; audit operations are `agentguard.audit_write` descendants at the
+point each lifecycle event is committed. Current child attributes include:
+
+```
 agentguard.agent.name            string   Human-readable name
-agentguard.action                string   The tool/action invoked
-agentguard.resource              string   Target resource
 agentguard.permission.granted    bool
 agentguard.permission.reason     string
-agentguard.policy.violations     int      Count of policy violations
+agentguard.policy.stage          string
+agentguard.policy.bundle_version string
+agentguard.policy.result_count   int
+agentguard.policy.violation_count int     Count of policy violations
 agentguard.policy.critical       bool     Any critical violations
-agentguard.sandbox.backend       string   "docker" | "wasm" | "none"
+agentguard.audit.event_type      string
+agentguard.audit.result          string
+agentguard.audit.duration_ms     float
+agentguard.invocation.id         string
+```
+
+Configured OTel meter providers also receive:
+
+```
+agentguard.governance.outcomes   Counter   Attribute: agentguard.result
+agentguard.governance.duration   Histogram milliseconds by terminal result
+```
+
+Future domain instrumentation may add:
+
+```
+agentguard.sandbox.backend       string   "docker" | "none"
 agentguard.sandbox.duration_ms   float
 agentguard.cost.tokens           int      Total LLM tokens in this trace
 agentguard.cost.usd              float    Estimated cost
@@ -399,11 +804,10 @@ agentguard.hitl.required         bool
 agentguard.hitl.approved         bool
 ```
 
-`AgentTracer` is lazily imported — if `opentelemetry-sdk` is not installed,
-all spans become no-ops and the governance pipeline runs with zero
-observability overhead. Integration adapters accept an optional `tracer`
-parameter and automatically wrap the full pipeline (identity → RBAC →
-audit → execute) in a single span named `agentguard.tool_call`.
+`AgentTracer` imports OTel lazily and never configures the host's global providers. Without an
+explicit SDK `TracerProvider`/`MeterProvider`, spans and instruments are no-ops and `is_active` is
+false. Integration adapters accept an optional tracer; tracing failures are best-effort and cannot
+mask the governed call's original exception.
 
 ### Audit Replay
 
@@ -431,28 +835,30 @@ agentguard observe dashboard --log-dir ./audit-logs --output-format markdown
 agentguard observe summary --log-dir ./audit-logs
 ```
 
-Latency percentiles (p50/p95/p99) are computed only for events with a
-positive `duration_ms` — integration adapters currently emit that field
-only on error events (per ADR-004), so production latency metrics should
-be sourced from OTel spans rather than pre-event audit records.
+Latency percentiles (p50/p95/p99) use completed invocation lifecycles. The
+kernel writes measured `duration_ms` on `execution_completed` and delivery
+terminal events; configured OTel histograms provide the corresponding live
+runtime signal.
 
 ---
 
 ## Protocol Integration Design
 
-All framework adapters route tool calls through a **shared governance
-pipeline** (`agentguard.integrations._pipeline.run_governed`) so behavior
-is identical across MCP, LangGraph, CrewAI, Google ADK, and A2A:
+All framework adapters route tool calls through a shared
+`agentguard.guardrails.GovernanceKernel`, so behavior is identical across
+MCP, LangGraph, CrewAI, Google ADK, and A2A:
 
 ```
-resolve identity -> RBAC check -> audit (allowed, pre)
-                 -> circuit breaker -> executor
-                 -> audit (error, on failure)  (ADR-004)
+transform -> derive action/resource -> RBAC/policy/guardrails -> rate limit
+          -> circuit breaker [atomic admission -> execute]
+          -> execution_completed -> post-policy/guardrails -> delivery terminal
 ```
 
-Adapters are thin — they build the executor callable for their framework
-and delegate everything else to the shared pipeline. New frameworks can be
-supported by writing a ~30-line adapter that constructs an executor lambda.
+Adapters are thin: they build the typed payload and executor callable for their
+framework, then delegate to the kernel. Constructors accept either a preconfigured
+`kernel=` or the legacy dependency arguments; mixing the two configurations is
+rejected. The private `_pipeline.run_governed` entry point remains only as a
+deprecated compatibility shim.
 
 ### MCP Middleware (`GovernedMcpClient`)
 
@@ -464,26 +870,56 @@ from agentguard.integrations import GovernedMcpClient
 client = GovernedMcpClient(
     session=mcp_session,
     agent_id=agent.agent_id,
-    registry=registry, rbac_engine=engine, audit_log=audit,
+    registry=registry,
+    rbac_engine=engine,
+    audit_log=audit,
+    # RBAC resources are derived by the integrator at construction time —
+    # never accepted from the agent at call time (ADR-023). Tools without an
+    # entry here cannot be called: the resource is unresolvable, so the call
+    # is denied and audited.
+    resources={
+        "web_search": "web/search",
+        "read_record": lambda args: f"records/{args['record_id']}",
+    },
 )
 result = await client.call_tool("web_search", {"query": "..."})
 ```
 
+### Resource derivation (all adapters)
+
+`ResourceResolver = str | Callable[[Any], str | Awaitable[str]]`. Every derived
+resource is canonicalised before RBAC (`canonicalize_resource`: rejects
+`*?[]<>`, control characters, absolute paths and `..` traversal; normalises;
+case-folds) and an unresolvable resource is a fail-closed, audited denial
+against the sentinel `<unresolved>`. `Permission.matches` uses
+`fnmatch.fnmatchcase` — resources compare case-insensitively, actions
+case-sensitively. See ADR-023.
+
 ### LangGraph Integration (`GovernedLangGraphToolNode`)
 
-Drop-in replacement for LangGraph's `ToolNode`. Exposes `ainvoke(tool_name,
-input, resource)` and routes through the governance pipeline.
+Constructed with `resources: Mapping[tool_name, ResourceResolver]` (resolver
+input: `tool_input`). Exposes the legacy `ainvoke(tool_name, tool_input)`
+form, and also acts as a native async node: `ainvoke` accepts a LangGraph
+messages-state mapping (tool calls are read from the last message, and native
+`ToolMessage` objects are returned when `langchain-core` is installed), and
+`__call__` delegates to `ainvoke`. A tool with no resolver entry — or a
+resolver entry with no registered tool — is denied and audited rather than
+raising `KeyError`.
 
 ### CrewAI Integration (`GovernedCrewAITool`)
 
 Wraps a CrewAI tool (sync `_run` method) so invocations go through the
-governance pipeline. The wrapper exposes an async `run(*args, **kwargs)`;
-callers can override the RBAC resource per-call via `_resource=...`.
+governance kernel. Constructed with a required `resource: ResourceResolver`
+(resolver input: `{"args": args, "kwargs": kwargs}`); exposes async
+`arun(*args, **kwargs)` and a governed sync `_run` behind CrewAI's native
+`.run()` (inherited from `BaseTool` when the `crewai` extra is installed —
+see ADR-045). Passing `_resource=` raises `TypeError`.
 
 ### Google ADK Integration (`GovernedAdkTool`)
 
-Wraps an ADK tool's `run_async(args, tool_context)` method. Resource
-pattern can be set per-instance or overridden per-call.
+Wraps an ADK tool's `run_async(args, tool_context)` method. Constructed with
+a required `resource: ResourceResolver` (resolver input: `args`); there is no
+per-call override.
 
 ### A2A Middleware (`GovernedA2AClient`)
 
@@ -496,38 +932,103 @@ relationships.
 
 ## Security Threat Model
 
-Primary threats and mitigations:
+Primary threats and the mitigation each one is *designed* to have. Status applies only
+when the application routes calls through an AgentGuard adapter or the kernel directly.
 
-| Threat | Vector | Mitigation |
-|--------|--------|------------|
-| Prompt injection | User input → agent prompt → tool args | Content scanning policy (OWASP-AGENT-01) |
-| Privilege escalation | Agent requests higher-permission tool | RBAC deny-override; no self-grant |
-| Sandbox escape | Tool binary escapes Docker/Wasm | Minimal base images; seccomp profiles; read-only FS |
-| Audit log tampering | Attacker modifies past events | HMAC chain; append-only storage |
-| HITL bypass | Agent retries without waiting for approval | Circuit breaker blocks retries during pending approval |
-| Data exfiltration | Agent leaks PII via tool calls | PII detection policy; network egress control in sandbox |
-| Tool poisoning | Malicious tool definition injected | Tool registry with signature verification |
-| Credential theft | Agent accesses secrets it shouldn't | Vault integration; short-lived tokens per sandbox |
+| Threat | Vector | Intended mitigation | Status |
+|--------|--------|---------------------|--------|
+| Privilege escalation | Agent requests higher-permission tool | RBAC deny-override; no self-grant | **Mitigated on the adapter boundary** — trusted adapter resolvers derive and canonicalize action/resource; unresolved subjects deny before RBAC. Raw-tool bypass remains an application-boundary risk. |
+| Audit log tampering | Attacker modifies past events | HMAC chain; append-only storage | **Partial** — schema-v8 sequence/checkpoint verification detects edits, truncation, and signed guardrail/HITL/reconciliation/authentication/registry-evidence tampering with an external trusted head; `agentguard audit export-checkpoint` plus a collector `trusted_checkpoint_path` make that head operational, so a rollback of the audit directory and collector state together is detected against an off-host witness; collector mode separates keys and ordering, but a rollback newer than the last exported witness, same-UID dual-domain compromise, and symmetric-key repudiation remain. |
+| Prompt injection | User input → agent prompt → tool args | Content scanning policy (OWASP-AGENT-01) | **Partial** — pre-stage policy and input guardrails inspect the transformed payload and can deny/escalate known patterns; semantic attacks outside configured checks remain. |
+| Data exfiltration | Agent leaks PII via tool calls | PII detection; sandbox egress control | **Partial** — post-stage PII and secret guardrails can deny delivery of inspected results; configured sandbox obligations force hardened network-disabled execution, while host/raw-tool bypass remains an application-boundary risk. |
+| Sandbox escape | Tool escapes the container | Minimal base images; seccomp profiles; read-only FS | **Mitigated when a sandbox obligation is configured** — enforced PRE_TOOL obligations require the hardened Docker backend with read-only non-root execution, dropped capabilities, no-new-privileges, quotas, bounded logs, and no network; applications without the obligation remain unsandboxed. |
+| HITL bypass | Agent retries without waiting for approval | Durable authenticated approval state | **Partial** — PRE_TOOL/PRE_MESSAGE registered-executor requests and guardrail-triggered POST_TOOL/POST_MESSAGE/ON_DECISION delivery requests support authenticated decisions, protected continuations, exact runtime binding, signed activation evidence, distinct one-time claims, RBAC recheck, optional signed-marker recovery, and checkpoint-attested unknown-window classification. Credit review approval releases only the sealed review outcome; final credit disposition is a separately authorized `decision:override`. INPUT, policy-only, and legacy caller-executor continuation remain unsupported; ambiguous work is never replayed. |
+| Agent impersonation | Caller asserts another agent's id | Verified short-lived workload credentials | **Mitigated on the secure boundary** — secure kernel mode rejects ID-only calls, authenticates before observation, and uses registry-only roles with sticky continuation binding. First-party adapters obtain a fresh credential before constructing request data; the optional concrete verifier enforces fixed RS256 signatures, claims, replay protection, pinned rotation, and revocation. Explicitly legacy kernel construction remains self-asserted. |
+| Tool poisoning | Malicious tool definition injected | Tool registry with signature verification | **Roadmap** — no tool registry or signing exists |
+| Credential theft | Agent accesses secrets it shouldn't | Vault integration; short-lived per-sandbox tokens | **Roadmap** — no secrets-manager integration exists |
+
+Two further caveats that are properties of the design rather than of any one threat:
+the adapters wrap a callable the caller still holds, so calling the raw tool bypasses
+governance entirely; and a guardrail bypass is only as strong as the boundary the
+application chooses to route through.
 
 ---
 
 ## Deployment Patterns
 
-**Pattern 1 — Library (embedded):**
-AgentGuard runs in-process with the agent application. Simplest deployment; suitable for single-machine agent systems.
+**Pattern 1 — Library (embedded).** *The only supported pattern.*
+AgentGuard runs in-process with the agent application. Suitable for single-machine
+agent systems. Note that in-process governance is advisory with respect to the
+application itself: code in that process can call the wrapped tool directly. Local
+`AppendOnlyAuditLog` mode also keeps its HMAC key in process; collector mode moves key
+custody and ordering behind a same-host Unix-socket boundary.
 
-**Pattern 2 — Sidecar:**
-AgentGuard runs as a sidecar container alongside the agent application. Tool calls are proxied through AgentGuard's local HTTP endpoint. Suitable for containerized deployments.
-
-**Pattern 3 — Gateway:**
-AgentGuard runs as a standalone governance gateway. All agent applications in an organization route tool calls through it. Enables centralized audit, compliance reporting, and policy management. Suitable for enterprise deployments with multiple agent teams.
+**Patterns 2 and 3 — sidecar and gateway — are roadmap.** No HTTP surface, proxy,
+server, or remotely deployable control-plane service ships in this package. The authoritative
+registry control plane is an in-process library API, not a sidecar or gateway.
 
 ---
 
 ## Versioning and Stability Contract
 
 - **`agentguard.core.*`**: Stable API — breaking changes require major version bump and deprecation notice
+- **`agentguard.guardrails.*`**: Public runtime API — `GovernanceKernel`, immutable payload contracts, guardrail chain, and content controls
 - **`agentguard.compliance.*`**: Stable API — policy schema changes are backward-compatible within minor versions
 - **`agentguard.domains.*`**: Beta — may change in minor versions; domain modules are versioned independently
-- **`agentguard.integrations.*`**: Stable in v1.0 — public adapter classes and constructor signatures are frozen. The ``_pipeline`` helper is private.
-- **`agentguard.observability.*`**: Stable in v1.0 — `AgentTracer`, `ReplayDebugger`, and `MetricsDashboard` APIs are frozen.
+- **`agentguard.integrations.*`**: Stable in v1.0 — public adapter classes and constructor signatures are frozen. The `_pipeline` module is a deprecated private compatibility shim.
+- **`agentguard.observability.*`**: Stable in v1.0 — `AgentTracer`, `ReplayDebugger`, and `MetricsDashboard` APIs are frozen. Shadow views and summaries are additive evidence surfaces.
+
+---
+
+## Roadmap — not yet implemented
+
+Everything in this table is described elsewhere in this document as part of the target
+architecture and **does not exist in the shipped package**. Phase numbers refer to
+[`docs/plans/guardrails-realignment.md`](docs/plans/guardrails-realignment.md) §6.
+
+### Layer 1 — Security runtime
+
+| Item | Status | Phase |
+|---|---|---|
+| Wasm sandbox backend (`wasmtime-py`) | Not started. No `wasmtime` import exists anywhere in the package. | — |
+| Sandbox on the governed path | **Shipped** (ADR-045). `GovernanceKernel` accepts a `sandbox_backend` and runs sandbox-obligated tool commands through it. | — |
+| Custom seccomp profile for the Docker sandbox | Not started. The backend already sets `read_only`, non-root `user`, `cap_drop=ALL`, `no-new-privileges`, `pids_limit`, and a CPU quota; only a bespoke seccomp profile remains (Docker's default profile applies). | 5.3 |
+| Per-call temporary volume mounts and per-tool network opt-in | Not started. | 5.3 |
+| S3 / GCS audit backends | Not started. No cloud storage backend ships. | — |
+| PostgreSQL audit backend and an `agentguard[postgres]` extra | Not started. No such extra exists, and a core DB dependency is explicitly out of scope per CLAUDE.md. | — |
+
+### Layer 2 — Compliance
+
+| Item | Status | Phase |
+|---|---|---|
+| `AgentGuard` facade class with `hitl_handler=` | **No such class exists.** Adapters are constructed with explicit dependencies. | 5.4 |
+| Property 4 — credit model monotonicity proof | Not started. No monotonicity encoding exists. | — |
+| Property 5 — adverse action ordering proof | Not started. Ordering is enforced by a sort tie-break, not proven. | — |
+| Z3 Datalog/µZ workflow reachability | Not planned. `verify_workflow_safety` is a BFS and stays one (ADR-016). | — |
+| Sound RBAC encoding (fnmatch subsumption, role inheritance) and a differential test against `RBACEngine` | **Shipped.** `z3_models.py` compiles fnmatch patterns to Z3 regexes, the verifier flattens role inheritance exactly as the runtime does, and `test_formal_verifier_differential.py` checks the encoding against `RBACEngine`. | — |
+| Official FINOS AIR-\* risk mapping | Not started. Rule IDs are AgentGuard-local `AG-FINOS-NNN`. | 4/5 |
+
+### CLI
+
+| Item | Status | Phase |
+|---|---|---|
+| `verify` subcommand for workflow safety | Not implemented. The `verify` group is `rbac` and `policy` only; workflow safety is Python-API only. | — |
+| `verify` subcommand for model properties (monotonicity) | Not implemented; depends on Property 4. | — |
+| `sandbox` command group | Not implemented. There is no `sandbox` group. | — |
+
+### Layer 4 and operations
+
+| Item | Status | Phase |
+|---|---|---|
+| Metrics endpoint (`/metrics` or Prometheus exporter) | OTel outcome and duration instruments ship; AgentGuard does not expose an HTTP metrics endpoint. | — |
+| Replay as re-evaluation against a pinned policy bundle | Not started. `ReplayDebugger` filters and prints. | — |
+| Sidecar deployment (HTTP proxy endpoint) | Not started. No HTTP surface ships. | — |
+| Gateway deployment (standalone governance service, central policy management) | Not started. | — |
+| Tool registry with signature verification | Not started. | — |
+| Vault / secrets-manager integration, short-lived per-sandbox tokens | Not started. | — |
+
+### Adapters
+
+| Item | Status | Phase |
+|---|---|---|
+| Validation against the real LangGraph / CrewAI / Google ADK / MCP packages | LangGraph messages-state/ToolMessage, CrewAI BaseTool, ADK FunctionTool, MCP `ClientSession.call_tool`, and A2A `message_send` boundaries are implemented. Optional framework-shape tests run in the CI extras matrix; local environments without extras skip those package-specific cases. | 5.1 |

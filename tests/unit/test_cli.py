@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import subprocess
+import sys
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
@@ -151,3 +153,83 @@ def test_audit_verify_detects_tampering(tmp_path: Path) -> None:
     result = runner.invoke(app, ["audit", "verify", "--log-dir", str(log_dir)])
     assert result.exit_code == 1
     assert "tamper" in result.output.lower()
+
+
+def _flat(text: str) -> str:
+    """Collapse rich console wrapping so substring assertions are stable."""
+    return " ".join(text.lower().split())
+
+
+def _write_bad_policy(policy_dir: Path) -> None:
+    """Write a policy file whose check type is misspelled."""
+    policy_dir.mkdir(parents=True, exist_ok=True)
+    (policy_dir / "typo.yaml").write_text(
+        """
+name: "Typo"
+version: "1.0"
+rules:
+  - id: TYPO-01
+    name: Blocklist with a typo
+    severity: critical
+    description: test
+    check:
+      type: action_blocklsit
+      patterns: ["tool:danger"]
+    remediation: Fix the check type.
+"""
+    )
+
+
+def test_module_entry_point() -> None:
+    """`python -m agentguard.cli --help` runs the Typer app."""
+    result = subprocess.run(  # noqa: S603
+        [sys.executable, "-m", "agentguard.cli", "--help"],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "usage" in result.stdout.lower()
+
+
+def test_policy_validate_unknown_check_type(tmp_path: Path) -> None:
+    """policy validate exits 1 with a clear message on an unknown check type."""
+    policy_dir = tmp_path / "policies"
+    _write_bad_policy(policy_dir)
+    result = runner.invoke(app, ["policy", "validate", "--policy-dir", str(policy_dir)])
+    assert result.exit_code == 1
+    assert "unknown check type" in _flat(result.output)
+    assert "typo-01" in _flat(result.output)
+
+
+@pytest.mark.usefixtures("_set_audit_key")
+def test_policy_report_unknown_check_type(tmp_path: Path) -> None:
+    """policy report exits 1 rather than reporting against a broken policy set."""
+    log_dir = tmp_path / "audit"
+    log_dir.mkdir()
+    _write_events(log_dir, count=1)
+    policy_dir = tmp_path / "policies"
+    _write_bad_policy(policy_dir)
+    result = runner.invoke(
+        app,
+        [
+            "policy",
+            "report",
+            "--log-dir",
+            str(log_dir),
+            "--policy-dir",
+            str(policy_dir),
+        ],
+    )
+    assert result.exit_code == 1
+    assert "unknown check type" in _flat(result.output)
+
+
+def test_verify_policy_unknown_check_type(tmp_path: Path) -> None:
+    """verify policy exits 1 on an unloadable policy set."""
+    policy_dir = tmp_path / "policies"
+    _write_bad_policy(policy_dir)
+    result = runner.invoke(app, ["verify", "policy", "--policy-dir", str(policy_dir)])
+    assert result.exit_code == 1
+    assert "unknown check type" in _flat(result.output)

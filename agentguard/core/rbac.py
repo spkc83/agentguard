@@ -6,6 +6,12 @@ Resolution order:
 3. If ANY matching permission has effect="deny" → DENIED.
 4. If at least one matching permission has effect="allow" → ALLOWED.
 5. If no matching permissions at all → DENIED (deny by default).
+
+Pattern matching is platform-independent (``fnmatchcase``, never the
+``normcase``-applying ``fnmatch``): actions match case-sensitively, resources
+case-insensitively. See :class:`Permission` for why the two differ. Callers are
+expected to hand this engine a canonical resource — see
+:func:`agentguard.guardrails.kernel.canonicalize_resource`.
 """
 
 from __future__ import annotations
@@ -24,9 +30,20 @@ logger = structlog.get_logger()
 class Permission(BaseModel):
     """A single permission rule.
 
+    Matching uses :func:`fnmatch.fnmatchcase`, never :func:`fnmatch.fnmatch`:
+    the latter applies :func:`os.path.normcase`, so the same policy would mean
+    different things on Linux and Windows. Policy semantics must not depend on
+    the host platform.
+
     Args:
         action: Action pattern — supports fnmatch wildcards (e.g. "tool:*").
+            Matched **case-sensitively**: actions are chosen by the integrator,
+            and folding case there would silently widen the policy.
         resource: Resource pattern — supports fnmatch wildcards (e.g. "bureau/*").
+            Matched **case-insensitively** (both pattern and subject are
+            case-folded): a resource is derived from tool arguments, so an
+            agent that controls its casing must not be able to slip
+            ``Admin/keys`` past a ``deny admin/*`` rule.
         effect: "allow" or "deny".
     """
 
@@ -37,8 +54,18 @@ class Permission(BaseModel):
     effect: Literal["allow", "deny"]
 
     def matches(self, action: str, resource: str) -> bool:
-        """Check if this permission matches the given action and resource."""
-        return fnmatch.fnmatch(action, self.action) and fnmatch.fnmatch(resource, self.resource)
+        """Check if this permission matches the given action and resource.
+
+        Args:
+            action: The requested action (matched case-sensitively).
+            resource: The canonical requested resource (matched case-insensitively).
+
+        Returns:
+            True if both the action and resource patterns match.
+        """
+        return fnmatch.fnmatchcase(action, self.action) and fnmatch.fnmatchcase(
+            resource.casefold(), self.resource.casefold()
+        )
 
 
 class Role(BaseModel):

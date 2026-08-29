@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import pytest
 
-from agentguard.core.sandbox import DockerSandboxBackend, SandboxConfig
+from agentguard.core.sandbox import SANDBOX_TIMEOUT, DockerSandboxBackend, SandboxConfig
+
+pytest.importorskip("docker", reason="Docker sandbox integration requires agentguard[sandbox]")
 
 
 @pytest.mark.integration
@@ -18,6 +20,7 @@ class TestDockerSandboxIntegration:
         assert result.exit_code == 0
         assert "hello from docker" in result.stdout
         assert result.backend == "docker"
+        assert result.reason_code == ""
 
     async def test_python_run(self) -> None:
         backend = DockerSandboxBackend(image="python:3.11-slim")
@@ -27,6 +30,7 @@ class TestDockerSandboxIntegration:
         )
         assert result.exit_code == 0
         assert "4" in result.stdout
+        assert result.reason_code == ""
 
     async def test_timeout_kills_container(self) -> None:
         backend = DockerSandboxBackend(image="python:3.11-slim")
@@ -34,4 +38,4 @@ class TestDockerSandboxIntegration:
             command=["sleep", "60"],
             config=SandboxConfig(timeout_seconds=3.0),
         )
-        assert result.exit_code != 0
+        assert result.reason_code == SANDBOX_TIMEOUT

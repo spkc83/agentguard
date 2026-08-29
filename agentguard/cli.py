@@ -6,6 +6,8 @@ Entry point: `agentguard` (configured in pyproject.toml).
 from __future__ import annotations
 
 import asyncio
+import os
+import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -106,23 +108,139 @@ def audit_show(
     asyncio.run(_show())
 
 
+def _write_witness(destination: Path, payload: str) -> None:
+    """Atomically write an owner-only checkpoint witness file."""
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_path = tempfile.mkstemp(
+        prefix=f".{destination.name}-", dir=destination.parent
+    )
+    try:
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary_path, destination)
+        temporary_path = ""
+        directory_fd = os.open(destination.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        if temporary_path and os.path.exists(temporary_path):
+            os.unlink(temporary_path)
+
+
+@audit_app.command("export-checkpoint")
+def audit_export_checkpoint(
+    audit_dir: Path = typer.Option(
+        "./audit-logs", "--audit-dir", "--log-dir", help="Audit log directory."
+    ),
+    output: Path = typer.Option(
+        None, help="Write the checkpoint here instead of stdout; never rolled backwards."
+    ),
+) -> None:
+    """Export the signed audit head for off-host rollback detection.
+
+    Replicate the exported file to a host that does not share the audit
+    directory's failure domain, then pass it back with
+    ``agentguard audit verify --trusted-checkpoint``.
+    """
+    from agentguard.core.audit import AppendOnlyAuditLog, AuditCheckpoint, FileAuditBackend
+    from agentguard.exceptions import AuditError
+
+    async def _export() -> None:
+        try:
+            log = AppendOnlyAuditLog(backend=FileAuditBackend(directory=audit_dir))
+            await log.verify_chain()
+            checkpoint = await log.export_checkpoint()
+        except (AuditError, OSError) as e:
+            console.print(f"[red]Checkpoint export refused:[/red] {e}")
+            raise typer.Exit(code=1) from None
+        if checkpoint is None:
+            console.print(
+                "[red]No signed audit head to export:[/red] the log is empty or predates "
+                "checkpointed schema v3."
+            )
+            raise typer.Exit(code=1)
+
+        payload = checkpoint.model_dump_json()
+        if output is None:
+            typer.echo(payload)
+            return
+        if output.exists():
+            try:
+                existing = AuditCheckpoint.model_validate_json(output.read_text(encoding="utf-8"))
+                # Authenticate the existing witness before letting it be replaced:
+                # an unsigned file must not be able to block or redirect exports.
+                log.verify_checkpoint_signature(existing)
+            except (AuditError, OSError, ValueError) as e:
+                console.print(f"[red]Existing checkpoint file is not authentic:[/red] {e}")
+                raise typer.Exit(code=1) from None
+            if existing.chain_id != checkpoint.chain_id:
+                console.print(
+                    "[red bold]WITNESS CHAIN MISMATCH[/red bold] — "
+                    f"{output} commits to chain {existing.chain_id}; this log is "
+                    f"chain {checkpoint.chain_id}. Refusing to rebind the witness."
+                )
+                raise typer.Exit(code=1)
+            if existing != checkpoint and existing.head_sequence >= checkpoint.head_sequence:
+                console.print(
+                    "[red bold]WITNESS ROLLBACK REFUSED[/red bold] — "
+                    f"{output} already commits to head sequence {existing.head_sequence}; "
+                    f"this log's head is {checkpoint.head_sequence}."
+                )
+                raise typer.Exit(code=1)
+        _write_witness(output, payload)
+        console.print(
+            f"[green]Checkpoint exported.[/green] head_sequence={checkpoint.head_sequence} "
+            f"-> {output}"
+        )
+
+    asyncio.run(_export())
+
+
 @audit_app.command("verify")
 def audit_verify(
     log_dir: Path = typer.Option("./audit-logs", help="Audit log directory."),
+    trusted_checkpoint: Path = typer.Option(
+        None,
+        help="Off-host checkpoint the log must still extend; detects a rolled-back log.",
+    ),
 ) -> None:
     """Verify audit log HMAC chain integrity."""
-    from agentguard.core.audit import AppendOnlyAuditLog, FileAuditBackend
-    from agentguard.exceptions import AuditTamperDetectedError
+    from agentguard.core.audit import AppendOnlyAuditLog, AuditCheckpoint, FileAuditBackend
+    from agentguard.exceptions import AuditRollbackDetectedError, AuditTamperDetectedError
 
     async def _verify() -> None:
         try:
-            log = AppendOnlyAuditLog(backend=FileAuditBackend(directory=log_dir))
+            anchor = (
+                AuditCheckpoint.model_validate_json(trusted_checkpoint.read_text(encoding="utf-8"))
+                if trusted_checkpoint is not None
+                else None
+            )
+        except (OSError, ValueError) as e:
+            console.print(f"[red]Trusted checkpoint unreadable:[/red] {e}")
+            raise typer.Exit(code=1) from None
+        try:
+            log = AppendOnlyAuditLog(
+                backend=FileAuditBackend(directory=log_dir),
+                trusted_checkpoint=anchor,
+            )
             result = await log.verify_chain()
             if result.valid:
                 console.print(
                     f"[green]Audit chain verified.[/green]"
                     f" {result.event_count} events, no tampering detected."
                 )
+        except AuditRollbackDetectedError as e:
+            console.print(
+                f"[red bold]ROLLBACK DETECTED[/red bold] — local head sequence "
+                f"{e.local_head_sequence} is behind trusted checkpoint head "
+                f"{e.trusted_head_sequence}."
+            )
+            raise typer.Exit(code=1) from None
         except AuditTamperDetectedError as e:
             console.print(
                 f"[red bold]TAMPER DETECTED[/red bold] at event index {e.event_index} "
@@ -176,9 +294,14 @@ def policy_validate(
 ) -> None:
     """Validate and list all loaded policy rules."""
     from agentguard.compliance.engine import PolicyEngine
+    from agentguard.exceptions import PolicyLoadError
 
     dirs = [policy_dir] if policy_dir else None
-    engine = PolicyEngine(policy_dirs=dirs)
+    try:
+        engine = PolicyEngine(policy_dirs=dirs)
+    except PolicyLoadError as e:
+        console.print(f"[red]Policy load failed:[/red] {e}")
+        raise typer.Exit(code=1) from None
 
     table = Table(title="Loaded Policy Rules")
     table.add_column("Rule ID", style="bold")
@@ -214,11 +337,16 @@ def policy_report(
     log_dir: Path = typer.Option("./audit-logs", help="Audit log directory."),
     policy_dir: Path = typer.Option(None, help="Policy YAML directory."),
     output_format: str = typer.Option("markdown", help="Output format: json or markdown."),
+    trusted_checkpoint: Path = typer.Option(
+        None,
+        help="Out-of-band trusted audit checkpoint required for clean attestation.",
+    ),
 ) -> None:
     """Generate a compliance report from audit events."""
     from agentguard.compliance.engine import PolicyEngine
     from agentguard.compliance.reporter import ComplianceReporter
-    from agentguard.core.audit import FileAuditBackend
+    from agentguard.core.audit import AppendOnlyAuditLog, AuditCheckpoint, FileAuditBackend
+    from agentguard.exceptions import AuditError, PolicyLoadError
 
     async def _report() -> None:
         backend = FileAuditBackend(directory=log_dir)
@@ -229,9 +357,24 @@ def policy_report(
             return
 
         dirs = [policy_dir] if policy_dir else None
-        engine = PolicyEngine(policy_dirs=dirs)
+        try:
+            engine = PolicyEngine(policy_dirs=dirs)
+        except PolicyLoadError as e:
+            console.print(f"[red]Policy load failed:[/red] {e}")
+            raise typer.Exit(code=1) from None
         reporter = ComplianceReporter(engine)
-        report = await reporter.generate_report(events)
+        try:
+            anchor = (
+                AuditCheckpoint.model_validate_json(trusted_checkpoint.read_text(encoding="utf-8"))
+                if trusted_checkpoint is not None
+                else None
+            )
+            report = await reporter.generate_report(
+                AppendOnlyAuditLog(backend=backend, trusted_checkpoint=anchor)
+            )
+        except (AuditError, OSError, ValueError) as e:
+            console.print(f"[red]Attestation refused:[/red] {e}")
+            raise typer.Exit(code=1) from None
 
         if output_format == "json":
             console.print(reporter.to_json(report))
@@ -262,7 +405,6 @@ def verify_rbac(
           resource: admin/users
         forbidden_roles: [analyst]
     """
-    from agentguard.compliance.formal_verifier import FormalVerifier
     from agentguard.core.rbac import Permission, Role
 
     if config is None:
@@ -289,7 +431,13 @@ def verify_rbac(
             Permission(action=p["action"], resource=p["resource"], effect=p["effect"])
             for p in r.get("permissions", [])
         ]
-        roles.append(Role(name=r["name"], permissions=perms))
+        roles.append(
+            Role(
+                name=r["name"],
+                permissions=perms,
+                inherited_roles=r.get("inherited_roles", []),
+            )
+        )
 
     # Compute the target permission index (matching the verifier's sort order)
     all_perms: set[tuple[str, str]] = set()
@@ -311,12 +459,21 @@ def verify_rbac(
 
     forbidden_roles = data.get("forbidden_roles", [])
 
-    verifier = FormalVerifier()
-    result = verifier.verify_rbac_escalation(
-        roles=roles,
-        target_permission_index=target_index,
-        forbidden_roles=forbidden_roles,
-    )
+    try:
+        from agentguard.compliance.formal_verifier import FormalVerifier
+
+        verifier = FormalVerifier()
+        result = verifier.verify_rbac_escalation(
+            roles=roles,
+            target_permission_index=target_index,
+            forbidden_roles=forbidden_roles,
+        )
+    except ImportError:
+        console.print(
+            "[red]z3-solver is required for formal verification.[/red]\n"
+            "Install with: pip install 'agentguard\\[verify]'"
+        )
+        raise typer.Exit(code=1) from None
 
     if result.status == "unsat":
         console.print(
@@ -334,6 +491,7 @@ def verify_rbac(
         raise typer.Exit(code=1)
     else:
         console.print(f"[yellow]Verification result: {result.status}[/yellow]")
+        raise typer.Exit(code=2)
 
 
 @verify_app.command("policy")
@@ -342,41 +500,24 @@ def verify_policy(
 ) -> None:
     """Check policy set for contradictions and dead rules."""
     from agentguard.compliance.engine import PolicyEngine
-    from agentguard.compliance.formal_verifier import FormalVerifier
+    from agentguard.exceptions import PolicyLoadError
 
     dirs = [policy_dir] if policy_dir else None
-    engine = PolicyEngine(policy_dirs=dirs)
-    verifier = FormalVerifier()
+    try:
+        engine = PolicyEngine(policy_dirs=dirs)
+    except PolicyLoadError as e:
+        console.print(f"[red]Policy load failed:[/red] {e}")
+        raise typer.Exit(code=1) from None
 
-    # Build simplified rule representations for Z3
-    rules = []
-    for rule in engine.all_rules:
-        check = rule.check
-        rules.append(
-            {
-                "id": rule.id,
-                "action_keyword": check.get("patterns", [""])[0] if check.get("patterns") else "",
-                "resource_keyword": "",
-                "effect": "deny" if rule.severity == "critical" else "allow",
-            }
-        )
-
+    rules = tuple(engine.all_rules)
     if not rules:
         console.print("[yellow]No policy rules found to verify.[/yellow]")
         return
-
-    result = verifier.verify_policy_consistency(rules)
-    if result.status == "unsat":
-        console.print(
-            f"[green]Policy consistency verified. "
-            f"{len(rules)} rules checked, no contradictions found.[/green]"
-        )
-    elif result.status == "sat":
-        console.print("[red]Contradictions found:[/red]")
-        for c in result.details.get("contradictions", []):
-            console.print(f"  {c['rule1']} <-> {c['rule2']}")
-    else:
-        console.print(f"[yellow]Verification result: {result.status}[/yellow]")
+    console.print(
+        "[yellow]Policy verification is unsupported for declarative checks: "
+        "no authorization effect is inferred from severity.[/yellow]"
+    )
+    raise typer.Exit(code=2)
 
 
 @observe_app.command("dashboard")
@@ -474,3 +615,7 @@ def observe_summary(
             console.print(f"  {k}: {v}")
 
     asyncio.run(_summary())
+
+
+if __name__ == "__main__":  # pragma: no cover
+    app()

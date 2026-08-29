@@ -14,6 +14,7 @@ from agentguard.core.rbac import Permission, RBACEngine, Role
 from agentguard.models import AuditEvent
 
 
+@pytest.mark.integration
 @pytest.mark.usefixtures("_set_audit_key")
 async def test_full_governance_flow(tmp_audit_dir: Path) -> None:
     """Simulate: register agent -> check permission -> write audit event -> verify chain."""

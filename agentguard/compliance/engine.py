@@ -10,22 +10,125 @@ documented in ARCHITECTURE.md.
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
+import json
+import math
 import re
+import threading
+from collections.abc import Callable, Mapping
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
+from fnmatch import fnmatchcase
+from functools import partial
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, Literal, cast
 
 import structlog
 import yaml
-from pydantic import BaseModel, ConfigDict
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_serializer,
+    field_validator,
+    model_validator,
+)
 
+from agentguard.exceptions import PolicyLoadError
 from agentguard.models import AuditEvent, PolicyResult
 
 Severity = Literal["critical", "high", "medium", "low"]
+PolicyStage = Literal["pre_tool", "post_tool", "pre_message", "post_message", "attestation"]
+FailureEffect = Literal["deny", "escalate", "warn"]
+
+#: Signature every policy check handler must implement.
+CheckHandler = Callable[["PolicyRule", AuditEvent], PolicyResult]
 
 logger = structlog.get_logger()
 
 # Default policies directory (shipped with the package)
 _DEFAULT_POLICIES_DIR = Path(__file__).parent / "policies"
+_DEFAULT_RUNTIME_TIMEOUT_SECONDS = 1.0
+
+
+def _freeze_policy_value(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        if any(not isinstance(key, str) for key in value):
+            raise ValueError("policy check keys must be strings")
+        return MappingProxyType({key: _freeze_policy_value(item) for key, item in value.items()})
+    if isinstance(value, list | tuple):
+        return tuple(_freeze_policy_value(item) for item in value)
+    if isinstance(value, set | frozenset):
+        raise ValueError("policy check sets are unsupported; use a list")
+    if value is None or isinstance(value, str | int | bool):
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError("policy check numbers must be finite")
+        return value
+    raise ValueError(f"unsupported policy check value: {type(value).__name__}")
+
+
+def _thaw_policy_value(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {key: _thaw_policy_value(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [_thaw_policy_value(item) for item in value]
+    return value
+
+
+class _PolicyHandlerExecutor:
+    """Bound blocking policy work and retain capacity until timed-out work exits."""
+
+    def __init__(self, max_workers: int = 4, max_pending: int = 8) -> None:
+        self._pool = ThreadPoolExecutor(
+            max_workers=max_workers,
+            thread_name_prefix="agentguard-policy",
+        )
+        self._capacity = threading.BoundedSemaphore(max_workers + max_pending)
+
+    async def call(
+        self,
+        handler: Callable[[], PolicyResult],
+        *,
+        timeout: float,
+    ) -> PolicyResult:
+        if not self._capacity.acquire(blocking=False):
+            raise TimeoutError("policy handler capacity exhausted")
+        try:
+            future = self._pool.submit(handler)
+        except BaseException:
+            self._capacity.release()
+            raise
+        future.add_done_callback(lambda _future: self._capacity.release())
+        return await asyncio.wait_for(
+            asyncio.shield(asyncio.wrap_future(future)),
+            timeout=timeout,
+        )
+
+
+_POLICY_HANDLER_EXECUTOR = _PolicyHandlerExecutor()
+
+
+class PolicyApplicability(BaseModel):
+    """Action/resource glob filters for a runtime policy rule."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    action: tuple[str, ...] | None = Field(default=None, min_length=1)
+    resource: tuple[str, ...] | None = Field(default=None, min_length=1)
+
+    @model_validator(mode="after")
+    def _require_filter(self) -> PolicyApplicability:
+        if self.action is None and self.resource is None:
+            raise ValueError("at least one action or resource filter is required")
+        for patterns in (self.action, self.resource):
+            if patterns is not None and any(not pattern for pattern in patterns):
+                raise ValueError("applicability patterns must not be empty")
+        return self
 
 
 class PolicyRule(BaseModel):
@@ -42,16 +145,40 @@ class PolicyRule(BaseModel):
         enabled: Whether this rule is active.
     """
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
-    id: str
+    id: str = Field(pattern=r"^[A-Z0-9][A-Z0-9._-]{0,63}$")
     name: str
     severity: Severity
     description: str
-    check: dict[str, Any]
+    check: Mapping[str, Any]
     remediation: str
-    references: list[str] = []
+    references: tuple[str, ...] = ()
     enabled: bool = True
+    stage: PolicyStage = "attestation"
+    applies_to: Literal["all"] | PolicyApplicability = "all"
+    on_fail: FailureEffect = "warn"
+
+    @field_validator("check", mode="after")
+    @classmethod
+    def _freeze_check(cls, value: Mapping[str, Any]) -> Mapping[str, Any]:
+        return cast("Mapping[str, Any]", _freeze_policy_value(value))
+
+    @field_serializer("check")
+    def _serialize_check(self, value: Mapping[str, Any]) -> dict[str, Any]:
+        return cast("dict[str, Any]", _thaw_policy_value(value))
+
+    @model_validator(mode="before")
+    @classmethod
+    def _accept_deprecated_effect(cls, data: Any) -> Any:
+        if not isinstance(data, Mapping) or "effect" not in data:
+            return data
+        normalized = dict(data)
+        effect = normalized.pop("effect")
+        if "on_fail" in normalized and normalized["on_fail"] != effect:
+            raise ValueError("effect and on_fail must match when both are provided")
+        normalized.setdefault("on_fail", effect)
+        return normalized
 
 
 class PolicySet(BaseModel):
@@ -64,12 +191,41 @@ class PolicySet(BaseModel):
         rules: The policy rules in this set.
     """
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     name: str
     version: str
+    schema_version: Literal[1, 2] = 1
     source_file: str = ""
-    rules: list[PolicyRule]
+    rules: tuple[PolicyRule, ...]
+
+
+class PolicyBundleSnapshot(BaseModel):
+    """Portable, immutable definition of one content-addressed policy bundle."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    version: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    policy_sets: tuple[PolicySet, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class PolicyBundle:
+    """One immutable, content-addressed policy generation."""
+
+    version: str
+    policy_sets: tuple[PolicySet, ...]
+    all_rules: tuple[PolicyRule, ...]
+    rule_ids: frozenset[str]
+
+
+@dataclass(frozen=True, slots=True)
+class PolicyReloadResult:
+    """Outcome of atomically rebuilding and activating a policy bundle."""
+
+    changed: bool
+    previous_version: str
+    current_version: str
 
 
 class PolicyEngine:
@@ -82,70 +238,400 @@ class PolicyEngine:
     - resource_pattern: Flag access to sensitive resource patterns.
     - content_scan: Scan tool args/action for suspicious patterns.
     - permission_required: Require specific permission grants.
-    - rate_check: Flag high-frequency actions.
+    - result_required: Require the event result to be in an allowed set.
     - metadata_required: Require specific metadata fields on the agent.
+
+    Unknown check types are rejected at load time (ADR-022): a misspelled
+    ``check.type`` would otherwise silently turn a control into a rule that
+    always passes, which violates the fail-safe-over-fail-open principle.
 
     Args:
         policy_dirs: Directories to load policy YAML files from.
             Defaults to the built-in policies directory.
+        extra_check_handlers: Additional check types, mapping a
+            ``check.type`` string to a callable taking ``(rule, event)``
+            and returning a PolicyResult. Registered before any policy
+            file is read, so custom types load like built-in ones.
+        max_retained_generations: How many non-active policy generations to
+            keep resolvable, or None (the default) to retain every generation
+            this instance has seen. The active generation is always retained.
+            Generations pinned by in-flight invocations are not tracked, so a
+            dropped generation makes :meth:`resolve_bundle` return None and any
+            report referencing it fails closed as unresolved provenance.
+
+    Raises:
+        PolicyLoadError: If a rule declares a check type with no handler.
+        ValueError: If a bound is not positive.
     """
 
-    def __init__(self, policy_dirs: list[Path] | None = None) -> None:
-        self._policy_sets: list[PolicySet] = []
-        dirs = policy_dirs or [_DEFAULT_POLICIES_DIR]
-        for d in dirs:
-            self._load_directory(d)
+    def __init__(
+        self,
+        policy_dirs: list[Path] | None = None,
+        extra_check_handlers: Mapping[str, CheckHandler] | None = None,
+        runtime_timeout_seconds: float = _DEFAULT_RUNTIME_TIMEOUT_SECONDS,
+        max_retained_generations: int | None = None,
+    ) -> None:
+        if not math.isfinite(runtime_timeout_seconds) or runtime_timeout_seconds <= 0:
+            raise ValueError("runtime_timeout_seconds must be finite and greater than zero")
+        if max_retained_generations is not None and max_retained_generations < 1:
+            raise ValueError("max_retained_generations must be at least one when set")
+        self._runtime_timeout_seconds = runtime_timeout_seconds
+        self._max_retained_generations = max_retained_generations
+        self._policy_dirs = tuple(policy_dirs or [_DEFAULT_POLICIES_DIR])
+        self._bundle_lock = threading.Lock()
+        self._reload_lock = asyncio.Lock()
+        # Built-in handlers are bound here so they share the (rule, event)
+        # signature that custom handlers use.
+        self._check_handlers: dict[str, CheckHandler] = {
+            "action_blocklist": self._check_action_blocklist,
+            "resource_pattern": self._check_resource_pattern,
+            "content_scan": self._check_content_scan,
+            "permission_required": self._check_permission_required,
+            "result_required": self._check_result_required,
+            "metadata_required": self._check_metadata_required,
+        }
+        if extra_check_handlers:
+            self._check_handlers.update(extra_check_handlers)
+        self._check_handlers = dict(self._check_handlers)
+
+        initial_bundle = self._build_bundle()
+        self._current_bundle = initial_bundle
+        self._bundle_history: dict[str, PolicyBundle] = {initial_bundle.version: initial_bundle}
         logger.info(
             "policy_engine_initialized",
-            policy_sets=len(self._policy_sets),
-            total_rules=sum(len(ps.rules) for ps in self._policy_sets),
+            policy_sets=len(initial_bundle.policy_sets),
+            total_rules=len(initial_bundle.all_rules),
+            bundle_version=initial_bundle.version,
         )
 
-    def _load_directory(self, directory: Path) -> None:
+    @property
+    def check_types(self) -> list[str]:
+        """Return the check types this engine can evaluate, sorted."""
+        return sorted(self._check_handlers)
+
+    def _load_directory(self, directory: Path) -> list[PolicySet]:
         """Load all YAML policy files from a directory."""
         if not directory.exists():
             logger.warning("policy_directory_not_found", directory=str(directory))
-            return
-        for yaml_file in sorted(directory.glob("*.yaml")):
-            self._load_file(yaml_file)
+            return []
+        yaml_files = [*directory.glob("*.yaml"), *directory.glob("*.yml")]
+        policy_sets: list[PolicySet] = []
+        for yaml_file in sorted(yaml_files):
+            policy_set = self._load_file(yaml_file)
+            if policy_set is not None:
+                policy_sets.append(policy_set)
+        return policy_sets
 
-    def _load_file(self, path: Path) -> None:
+    def _load_file(self, path: Path) -> PolicySet | None:
         """Load and validate a single policy YAML file."""
-        with open(path) as f:
-            data = yaml.safe_load(f)
-        if not data or not isinstance(data, dict):
+        try:
+            with open(path) as f:
+                data = yaml.safe_load(f)
+        except yaml.YAMLError as exc:
+            raise PolicyLoadError(
+                file=str(path), rule_id="<file>", detail=f"YAML syntax error: {exc}"
+            ) from exc
+
+        if not data:
             logger.warning("policy_file_empty", file=str(path))
-            return
+            return None
+        if not isinstance(data, dict):
+            raise PolicyLoadError(
+                file=str(path),
+                rule_id="<file>",
+                detail="validation error: policy document must be a mapping",
+            )
 
-        rules = []
-        for rule_data in data.get("rules", []):
-            rules.append(PolicyRule(**rule_data))
+        schema_version = data.get("schema_version", 1)
+        if schema_version not in {1, 2}:
+            raise PolicyLoadError(
+                file=str(path),
+                rule_id="<file>",
+                detail=f"unsupported policy schema_version {schema_version!r}",
+            )
 
-        ps = PolicySet(
-            name=data.get("name", path.stem),
-            version=data.get("version", "1.0"),
-            source_file=str(path),
-            rules=rules,
-        )
-        self._policy_sets.append(ps)
+        rule_data_items = data.get("rules", [])
+        if not isinstance(rule_data_items, list):
+            raise PolicyLoadError(
+                file=str(path),
+                rule_id="<file>",
+                detail="validation error: rules must be a list",
+            )
+
+        rules: list[PolicyRule] = []
+        for index, rule_data in enumerate(rule_data_items):
+            rule_id = (
+                str(rule_data.get("id", f"<rule {index}>"))
+                if isinstance(rule_data, Mapping)
+                else f"<rule {index}>"
+            )
+            if schema_version == 2 and isinstance(rule_data, Mapping):
+                missing = [
+                    field for field in ("stage", "applies_to", "on_fail") if field not in rule_data
+                ]
+                if missing:
+                    raise PolicyLoadError(
+                        file=str(path),
+                        rule_id=rule_id,
+                        detail=("schema v2 rules require explicit fields: " + ", ".join(missing)),
+                    )
+            try:
+                rule = PolicyRule.model_validate(rule_data)
+            except ValidationError as exc:
+                raise PolicyLoadError(
+                    file=str(path),
+                    rule_id=rule_id,
+                    detail=f"validation error: {exc}",
+                ) from exc
+            check_type = rule.check.get("type")
+            if check_type not in self._check_handlers:
+                raise PolicyLoadError(
+                    file=str(path),
+                    rule_id=rule.id,
+                    detail=(f"unknown check type {check_type!r}; known: {self.check_types}"),
+                )
+            rules.append(rule)
+
+        try:
+            ps = PolicySet(
+                name=data.get("name", path.stem),
+                version=data.get("version", "1.0"),
+                schema_version=schema_version,
+                source_file=str(path),
+                rules=tuple(rules),
+            )
+        except ValidationError as exc:
+            raise PolicyLoadError(
+                file=str(path), rule_id="<file>", detail=f"validation error: {exc}"
+            ) from exc
         logger.debug(
             "policy_set_loaded",
             name=ps.name,
             rules=len(ps.rules),
             file=str(path),
         )
+        return ps
+
+    def _build_bundle(self) -> PolicyBundle:
+        loaded_policy_sets = tuple(
+            policy_set
+            for directory in self._policy_dirs
+            for policy_set in self._load_directory(directory)
+        )
+        return self._bundle_from_policy_sets(loaded_policy_sets)
+
+    @classmethod
+    def _canonical_policy_sets(
+        cls,
+        policy_sets: tuple[PolicySet, ...],
+    ) -> tuple[PolicySet, ...]:
+        return tuple(
+            sorted(
+                policy_sets,
+                key=lambda policy_set: json.dumps(
+                    cls._policy_set_payload(policy_set),
+                    allow_nan=False,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ),
+            )
+        )
+
+    def _bundle_from_policy_sets(
+        self,
+        policy_sets: tuple[PolicySet, ...],
+    ) -> PolicyBundle:
+        """Validate policy-set relationships and build an immutable bundle."""
+
+        policy_sets = self._canonical_policy_sets(policy_sets)
+        declared_rules = tuple(rule for policy_set in policy_sets for rule in policy_set.rules)
+        declared_rule_ids = frozenset(rule.id for rule in declared_rules)
+        if len(declared_rule_ids) != len(declared_rules):
+            duplicate_ids = sorted(
+                rule_id
+                for rule_id in declared_rule_ids
+                if sum(rule.id == rule_id for rule in declared_rules) > 1
+            )
+            raise PolicyLoadError(
+                file="<bundle>",
+                rule_id=duplicate_ids[0],
+                detail="duplicate rule ID across policy files",
+            )
+        for policy_set in policy_sets:
+            for rule in policy_set.rules:
+                check_type = rule.check.get("type")
+                if check_type not in self._check_handlers:
+                    raise PolicyLoadError(
+                        file=policy_set.source_file or "<snapshot>",
+                        rule_id=rule.id,
+                        detail=(f"unknown check type {check_type!r}; known: {self.check_types}"),
+                    )
+        all_rules = tuple(rule for rule in declared_rules if rule.enabled)
+        rule_ids = frozenset(rule.id for rule in all_rules)
+        version = self._bundle_digest(policy_sets)
+        return PolicyBundle(
+            version=version,
+            policy_sets=policy_sets,
+            all_rules=all_rules,
+            rule_ids=rule_ids,
+        )
+
+    @staticmethod
+    def _policy_set_payload(policy_set: PolicySet) -> dict[str, Any]:
+        return {
+            "name": policy_set.name,
+            "version": policy_set.version,
+            "schema_version": policy_set.schema_version,
+            "rules": [rule.model_dump(mode="json") for rule in policy_set.rules],
+        }
+
+    @classmethod
+    def _bundle_digest(cls, policy_sets: tuple[PolicySet, ...]) -> str:
+        payload = [cls._policy_set_payload(policy_set) for policy_set in policy_sets]
+        canonical = json.dumps(
+            payload,
+            allow_nan=False,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+        return f"sha256:{hashlib.sha256(canonical).hexdigest()}"
+
+    @property
+    def current_bundle(self) -> PolicyBundle:
+        """Return the active immutable policy generation."""
+
+        return self.snapshot()
+
+    def snapshot(self) -> PolicyBundle:
+        """Pin the active bundle for a complete governed invocation."""
+
+        with self._bundle_lock:
+            return self._current_bundle
+
+    def export_bundle(self, bundle: PolicyBundle) -> PolicyBundleSnapshot:
+        """Export a canonical, path-independent snapshot for restart-safe restore.
+
+        The snapshot binds policy definitions and check-type names. It cannot bind
+        custom handler implementation semantics because handlers currently have no
+        declared semantic version; callers must register the same implementation
+        when restoring a bundle that uses a custom check type.
+        """
+
+        policy_sets = self._canonical_policy_sets(
+            tuple(
+                PolicySet.model_validate(
+                    {
+                        **policy_set.model_dump(mode="json", exclude={"source_file"}),
+                        "source_file": "",
+                    }
+                )
+                for policy_set in bundle.policy_sets
+            )
+        )
+        canonical_version = self._bundle_digest(policy_sets)
+        if canonical_version != bundle.version:
+            raise PolicyLoadError(
+                file="<bundle>",
+                rule_id="<bundle>",
+                detail="bundle version does not match canonical policy definitions",
+            )
+        return PolicyBundleSnapshot(version=bundle.version, policy_sets=policy_sets)
+
+    def restore_bundle(self, snapshot: PolicyBundleSnapshot) -> PolicyBundle:
+        """Validate and retain an exact bundle snapshot without activating it.
+
+        Restore fails closed if the digest is invalid or any declared check type
+        lacks a registered handler. As with :meth:`export_bundle`, custom handler
+        semantic equivalence cannot be verified until handlers expose versions.
+        The active bundle is never substituted for the requested generation.
+        """
+
+        candidate = self._bundle_from_policy_sets(snapshot.policy_sets)
+        if candidate.version != snapshot.version:
+            raise PolicyLoadError(
+                file="<snapshot>",
+                rule_id="<bundle>",
+                detail="snapshot version does not match canonical policy definitions",
+            )
+        with self._bundle_lock:
+            self._retain_generation_locked(candidate, replace=True)
+        return candidate
+
+    def _retain_generation_locked(self, bundle: PolicyBundle, *, replace: bool = False) -> None:
+        """Record a generation as the most recent, then apply the retention bound.
+
+        Dropping a generation is deliberate data loss: the engine never
+        substitutes the active bundle for a dropped one, so a later
+        :meth:`resolve_bundle` returns None and the caller must fail closed.
+        In-flight pinning is not tracked, so the bound must be set generously
+        enough to cover the longest invocation an operator expects.
+        """
+
+        limit = self._max_retained_generations
+        if replace or limit is not None:
+            # Reinsert so retention follows recency, not first appearance.
+            self._bundle_history.pop(bundle.version, None)
+        self._bundle_history.setdefault(bundle.version, bundle)
+        if limit is None:
+            return
+        active = self._current_bundle.version
+        droppable = [version for version in self._bundle_history if version != active]
+        for version in droppable[: max(len(droppable) - limit, 0)]:
+            del self._bundle_history[version]
+
+    async def reload(self) -> PolicyReloadResult:
+        """Build, validate, and atomically activate the configured policy files."""
+
+        async with self._reload_lock:
+            candidate = await asyncio.to_thread(self._build_bundle)
+            with self._bundle_lock:
+                previous = self._current_bundle
+                if candidate.version != previous.version:
+                    self._current_bundle = candidate
+                self._retain_generation_locked(candidate)
+                current = self._current_bundle
+        logger.info(
+            "policy_bundle_reloaded",
+            changed=current.version != previous.version,
+            previous_version=previous.version,
+            current_version=current.version,
+        )
+        return PolicyReloadResult(
+            changed=current.version != previous.version,
+            previous_version=previous.version,
+            current_version=current.version,
+        )
+
+    def resolve_bundle(self, version: str) -> PolicyBundle | None:
+        """Resolve a bundle generation retained by this engine instance."""
+
+        with self._bundle_lock:
+            return self._bundle_history.get(version)
 
     @property
     def policy_sets(self) -> list[PolicySet]:
         """Return all loaded policy sets."""
-        return list(self._policy_sets)
+        return list(self.snapshot().policy_sets)
 
     @property
     def all_rules(self) -> list[PolicyRule]:
         """Return all rules from all policy sets."""
-        return [r for ps in self._policy_sets for r in ps.rules if r.enabled]
+        return list(self.snapshot().all_rules)
 
-    async def evaluate(self, event: AuditEvent) -> list[PolicyResult]:
+    @property
+    def bundle_version(self) -> str:
+        """Return a path-independent canonical digest of the loaded policy bundle."""
+
+        return self.snapshot().version
+
+    async def evaluate(
+        self,
+        event: AuditEvent,
+        *,
+        bundle: PolicyBundle | None = None,
+    ) -> list[PolicyResult]:
         """Evaluate all enabled policy rules against an audit event.
 
         Args:
@@ -155,27 +641,76 @@ class PolicyEngine:
             List of PolicyResult for each rule evaluated.
         """
         results: list[PolicyResult] = []
-        for rule in self.all_rules:
-            result = self._evaluate_rule(rule, event)
+        active_bundle = bundle or self.snapshot()
+        for rule in active_bundle.all_rules:
+            result = await _POLICY_HANDLER_EXECUTOR.call(
+                partial(self._evaluate_rule, rule, event),
+                timeout=self._runtime_timeout_seconds,
+            )
             results.append(result)
         return results
 
+    async def evaluate_stage(
+        self,
+        event: AuditEvent,
+        stage: PolicyStage,
+        *,
+        bundle: PolicyBundle | None = None,
+    ) -> list[PolicyResult]:
+        """Evaluate applicable rules for one runtime stage.
+
+        Handler exceptions intentionally propagate so the governance pipeline can
+        convert them into its fail-closed denial path.
+        """
+        results: list[PolicyResult] = []
+        active_bundle = bundle or self.snapshot()
+        for rule in active_bundle.all_rules:
+            if rule.stage != stage or not self._rule_applies(rule, event):
+                continue
+            result = await _POLICY_HANDLER_EXECUTOR.call(
+                partial(self._evaluate_rule, rule, event),
+                timeout=self._runtime_timeout_seconds,
+            )
+            effect = "allow" if result.passed else rule.on_fail
+            results.append(result.model_copy(update={"effect": effect}))
+        return results
+
+    @staticmethod
+    def _rule_applies(rule: PolicyRule, event: AuditEvent) -> bool:
+        """Return whether an event matches every configured applicability field."""
+        if rule.applies_to == "all":
+            return True
+        values = {"action": event.action, "resource": event.resource}
+        return all(
+            patterns is None
+            or any(
+                fnmatchcase(values[field].casefold(), pattern.casefold()) for pattern in patterns
+            )
+            for field, patterns in (
+                ("action", rule.applies_to.action),
+                ("resource", rule.applies_to.resource),
+            )
+        )
+
     def _evaluate_rule(self, rule: PolicyRule, event: AuditEvent) -> PolicyResult:
-        """Evaluate a single rule against an event."""
+        """Evaluate a single rule against an event.
+
+        Raises:
+            PolicyLoadError: Defensive guard — unknown check types are
+                rejected at load time, so reaching this branch means a rule
+                was injected after construction.
+        """
         check_type = rule.check.get("type", "")
         handler = self._check_handlers.get(check_type)
 
-        if handler is None:
-            return PolicyResult(
+        if handler is None:  # pragma: no cover - blocked at load time
+            raise PolicyLoadError(
+                file="<runtime>",
                 rule_id=rule.id,
-                rule_name=rule.name,
-                passed=True,
-                severity=rule.severity,
-                evidence={"note": f"Unknown check type: {check_type}"},
-                remediation=rule.remediation,
+                detail=f"unknown check type {check_type!r}; known: {self.check_types}",
             )
 
-        return cast("PolicyResult", handler(self, rule, event))
+        return handler(rule, event)
 
     def _check_action_blocklist(self, rule: PolicyRule, event: AuditEvent) -> PolicyResult:
         """Check if the action matches any blocked pattern."""
@@ -230,8 +765,11 @@ class PolicyEngine:
             scan_text += event.action + " "
         if "resource" in targets:
             scan_text += event.resource + " "
+        context = event.permission_context.context
         if "tool_args" in targets:
-            scan_text += str(event.permission_context.context)
+            scan_text += str(context.get("tool_args", "")) + " "
+        if "tool_result" in targets:
+            scan_text += str(context.get("tool_result", "")) + " "
 
         scan_text = scan_text.lower()
         for pattern in patterns:
@@ -310,13 +848,3 @@ class PolicyEngine:
             },
             remediation=rule.remediation,
         )
-
-    # Dispatch table for check types
-    _check_handlers: dict[str, Any] = {
-        "action_blocklist": _check_action_blocklist,
-        "resource_pattern": _check_resource_pattern,
-        "content_scan": _check_content_scan,
-        "permission_required": _check_permission_required,
-        "result_required": _check_result_required,
-        "metadata_required": _check_metadata_required,
-    }

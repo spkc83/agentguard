@@ -17,7 +17,7 @@ from datetime import UTC, datetime
 from typing import Any, Literal
 
 import structlog
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 logger = structlog.get_logger()
 
@@ -45,7 +45,7 @@ class HitlEscalation(BaseModel):
     reason: str
     policy_rule_id: str = ""
     context: dict[str, Any] = {}
-    timestamp: datetime = datetime.now(UTC)
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
 class ApprovalDecision(BaseModel):
@@ -63,7 +63,7 @@ class ApprovalDecision(BaseModel):
     approved: bool
     approver_id: str
     reason: str = ""
-    timestamp: datetime = datetime.now(UTC)
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
 # Type alias for HITL handler functions

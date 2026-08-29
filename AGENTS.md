@@ -14,7 +14,7 @@ This file defines specialized agent roles for use with Claude Code's multi-agent
 **Owns:**
 - `agentguard/core/rbac.py` — permission model, role definitions, policy enforcement
 - `agentguard/core/audit.py` — immutable append-only audit logger
-- `agentguard/core/sandbox.py` — Docker/Wasm sandboxed execution engine
+- `agentguard/core/sandbox.py` — Docker sandboxed command runner (not yet on the governed call path; Wasm backend is roadmap)
 - `agentguard/core/circuit_breaker.py` — kill switches, rate limiting, breakers
 - `agentguard/core/identity.py` — agent identity, credentials, token management
 - `agentguard/exceptions.py` — all custom exception types
@@ -42,7 +42,7 @@ This file defines specialized agent roles for use with Claude Code's multi-agent
 **Owns:**
 - `agentguard/compliance/engine.py` — YAML policy evaluator, rule runner
 - `agentguard/compliance/policies/owasp_agentic.yaml` — OWASP Top 10 for Agentic AI
-- `agentguard/compliance/policies/finos_aigf_v2.yaml` — FINOS AI Governance Framework v2.0 (46 risks)
+- `agentguard/compliance/policies/finos_aigf_v2.yaml` — 15 controls informed by FINOS AI Governance Framework v2.0 (unofficial mapping)
 - `agentguard/compliance/policies/eu_ai_act.yaml` — EU AI Act high-risk requirements
 - `agentguard/compliance/hitl.py` — human-in-the-loop escalation patterns and callbacks
 - `agentguard/compliance/reporter.py` — compliance attestation report generator (PDF/JSON)
@@ -51,7 +51,7 @@ This file defines specialized agent roles for use with Claude Code's multi-agent
 **Key constraints:**
 - Policy files are the source of truth — engine evaluates them, never hardcodes rules
 - Each policy rule must have: `id`, `name`, `severity` (critical/high/medium/low), `description`, `check` (Python expression or jq-style selector), `remediation`
-- FINOS risk IDs must match the AIGF v2.0 spec exactly (e.g., `FINOS-AIGF-001` through `FINOS-AIGF-046`)
+- FINOS-aligned rules use AgentGuard-local IDs `AG-FINOS-NNN`; do not invent official FINOS `AIR-*` risk IDs — an official mapping requires domain review (Phase 4/5)
 - EU AI Act rules must reference the correct Article and Annex numbers
 - HITL escalation must be synchronous-safe (blocking) — it cannot be fire-and-forget
 
@@ -68,9 +68,9 @@ This file defines specialized agent roles for use with Claude Code's multi-agent
 **Owns:**
 - `agentguard/domains/finance/credit_risk/agent_templates.py` — credit decisioning agent templates
 - `agentguard/domains/finance/credit_risk/adverse_action.py` — adverse action notice generation (ECOA/Reg B compliant)
-- `agentguard/domains/finance/credit_risk/model_validation.py` — SR 11-7 model validation agent patterns
+- `agentguard/domains/finance/credit_risk/model_validation.py` — model validation agent patterns (historically SR 11-7-structured; SR 26-2 superseded SR 11-7 in April 2026)
 - `agentguard/domains/finance/credit_risk/fairness.py` — disparate impact / disparate treatment analysis tools
-- `agentguard/domains/finance/credit_risk/red_team.py` — credit AI adversarial evaluation suite (bias probes, monotonicity checks)
+- `agentguard/domains/finance/credit_risk/red_team.py` — credit AI adversarial evaluation suite (bias probes, monotonicity checks) *(planned; file does not exist yet)*
 - `agentguard/domains/finance/synthetic/wgan_gp.py` — WGAN-GP tabular data generator
 - `agentguard/domains/finance/synthetic/generators.py` — high-level synthetic data API (credit applications, loan performance)
 - `agentguard/domains/finance/pii.py` — PII detection and masking (SSN, account#, routing#, DOB, full-name+address)
@@ -81,22 +81,22 @@ This file defines specialized agent roles for use with Claude Code's multi-agent
 - `tests/unit/domains/`
 
 **Key constraints:**
-- Domain terminology must be accurate: PD/LGD/EAD, CECL, ECOA, Regulation B, Fair Housing Act, SR 11-7, Basel IRB, ALLL/ACL
+- Domain terminology must be accurate: PD/LGD/EAD, CECL, ECOA, Regulation B, Fair Housing Act, SR 26-2 (superseded SR 11-7, April 2026), Basel IRB, ALLL/ACL
 - Adverse action notices must cite specific, deterministic reasons ordered by impact (Regulation B requirement)
 - PII masking must cover all Category 1 PII and FCRA-regulated data before any data reaches the audit log
 - Synthetic credit data must include synthetic protected-class proxies for disparate impact testing — never infer real demographics
 - Fairness metrics (demographic parity, equalized odds, calibration) must be computed and logged; document which metric was optimized and why
 - All credit agent templates must be parameterizable — no hardcoded thresholds, institution names, or cut-off scores
-- Model validation agents must follow SR 11-7 structure: conceptual soundness, ongoing monitoring, outcomes analysis
+- Model validation agents keep the conceptual-soundness / ongoing-monitoring / outcomes-analysis structure (historically from SR 11-7; SR 26-2, which superseded it in April 2026, is principles-based and does not mandate this schema)
 - WGAN-GP generates credit application features: FICO, DTI, LTV, income, employment_status, loan_purpose, delinquency_history
 - The flagship domain is credit risk — credit decisioning, adverse action, model validation, and fairness analysis
 
 **Handoff contract (outputs):**
 - `SyntheticCreditDataset` — Pandas DataFrame with schema documented in `datasets/README.md`
-- `CreditDecisioningAgent` — AgentGuard-wrapped agent class ready for MCP/A2A use
+- `GovernedCreditAgent` — kernel-backed credit workflow with independently authorized actions
 - `AdverseActionNotice` Pydantic model — ECOA-compliant adverse action document
 - `FairnessReport` — disparate impact scorecard with 4/5ths rule calculations
-- `ModelValidationReport` — SR 11-7-aligned validation findings
+- `ModelValidationReport` — structured validation findings (conceptual soundness / monitoring / outcomes)
 
 ---
 
@@ -122,8 +122,7 @@ This file defines specialized agent roles for use with Claude Code's multi-agent
 - Every integration must have a working end-to-end example that passes CI without a real LLM (use a mock LLM responder)
 
 **Handoff contract (outputs):**
-- `GovernedTool` wrapper class — drop-in replacement for any framework's tool definition
-- `GovernedAgent` wrapper class — wraps any agent with AgentGuard governance
+- Per-framework governed wrappers — `GovernedLangGraphToolNode`, `GovernedCrewAITool`, `GovernedAdkTool`, `GovernedMcpClient`, `GovernedA2AClient` (duck-typed today; a generic `GovernedTool`/`GovernedAgent` facade is roadmap)
 - Integration test results — must include a tool-call intercept, a permission-denied case, and an audit log verification
 
 ---
@@ -174,13 +173,13 @@ This file defines specialized agent roles for use with Claude Code's multi-agent
 **What it can formally verify:**
 1. **RBAC privilege escalation**: "Is there any sequence of role assignments that allows agent A to reach permission P without it being explicitly granted?" — encodes roles/permissions as bitvectors, checks satisfiability of forbidden states
 2. **Policy consistency**: "Does this set of policy rules contain contradictions (rules that can never fire) or redundancies (rules always superseded by others)?" — encodes rules as logical formulas, checks for unsatisfiability
-3. **Workflow safety properties**: "In this agent graph, can a node with role X ever reach a tool requiring permission Y without passing through a HITL node?" — encodes graph as reachability problem in Z3's fixed-point engine (µZ)
-4. **Monotonicity constraints**: "Does this credit scoring agent's decision boundary maintain monotonicity (higher income → lower risk score) across all possible inputs in a defined range?" — encodes as quantified arithmetic formula
-5. **Adverse action determinism**: "For any two identical applicant profiles, does this agent always produce the same adverse action reasons in the same order?" — encodes as functional consistency check
+3. **Workflow safety properties**: "In this agent graph, can a node with role X ever reach a tool requiring permission Y without passing through a HITL node?" — **implemented as a breadth-first graph search, not Z3** (ADR-016); Python API only
+4. **Monotonicity constraints** *(planned; not yet implemented)*: "Does this credit scoring agent's decision boundary maintain monotonicity (higher income → lower risk score) across all possible inputs in a defined range?" — would encode as a quantified arithmetic formula
+5. **Adverse action determinism** *(planned; not yet implemented)*: "For any two identical applicant profiles, does this agent always produce the same adverse action reasons in the same order?" — would encode as a functional consistency check
 
 **Handoff contract (outputs):**
 - `VerificationResult`: `{property, status: sat|unsat|timeout|unknown, counterexample?, proof_certificate?}`
-- CLI: `agentguard verify rbac --config policy.yaml`, `agentguard verify workflow --graph graph.json`
+- CLI: `agentguard verify rbac --config policy.yaml`, `agentguard verify policy --policy-dir <dir>` (these two are the whole `verify` group)
 - `VerificationReport` — full formal verification attestation document for regulatory submission
 
 ---
@@ -236,11 +235,13 @@ These interfaces must be agreed upon and locked before parallel development begi
 ```python
 # agentguard/models.py — shared Pydantic models
 
+
 class AgentIdentity(BaseModel):
     agent_id: str
     name: str
     roles: list[str]
     metadata: dict[str, str] = {}
+
 
 class PermissionContext(BaseModel):
     agent: AgentIdentity
@@ -250,9 +251,10 @@ class PermissionContext(BaseModel):
     granted: bool = False
     reason: str = ""
 
+
 class AuditEvent(BaseModel):
-    event_id: str          # UUID
-    timestamp: datetime    # UTC
+    event_id: str  # UUID
+    timestamp: datetime  # UTC
     agent_id: str
     action: str
     resource: str
@@ -260,7 +262,8 @@ class AuditEvent(BaseModel):
     result: Literal["allowed", "denied", "escalated", "error"]
     policy_results: list[PolicyResult] = []
     duration_ms: float
-    trace_id: str          # OpenTelemetry trace ID
+    trace_id: str  # OpenTelemetry trace ID
+
 
 class PolicyResult(BaseModel):
     rule_id: str

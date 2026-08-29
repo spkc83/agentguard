@@ -12,25 +12,14 @@ All masking is applied BEFORE data enters the audit log.
 
 from __future__ import annotations
 
-import re
 from typing import Any
 
 import structlog
 from pydantic import BaseModel, ConfigDict
 
-logger = structlog.get_logger()
+from agentguard.guardrails import detect_pii, mask_pii, mask_pii_match, thaw_payload
 
-# PII detection patterns
-_SSN_PATTERN = re.compile(r"\b(\d{3})-(\d{2})-(\d{4})\b")
-_SSN_NO_DASH = re.compile(r"\b(\d{3})(\d{2})(\d{4})\b")
-_ACCOUNT_PATTERN = re.compile(r"\b(\d{4})\d{4,13}\b")
-_ROUTING_PATTERN = re.compile(r"\b\d{9}\b")
-_DOB_PATTERN = re.compile(
-    r"\b(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})\b"
-    r"|\b(\d{4}[/-]\d{1,2}[/-]\d{1,2})\b"
-)
-_EMAIL_PATTERN = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b")
-_PHONE_PATTERN = re.compile(r"\b\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b")
+logger = structlog.get_logger()
 
 
 class PiiMatch(BaseModel):
@@ -70,74 +59,16 @@ class PiiDetector:
         Returns:
             List of PiiMatch objects for each detected PII.
         """
-        matches: list[PiiMatch] = []
-
-        # SSN with dashes: 123-45-6789 -> XXX-XX-6789
-        for m in _SSN_PATTERN.finditer(text):
-            matches.append(
-                PiiMatch(
-                    pii_type="ssn",
-                    start=m.start(),
-                    end=m.end(),
-                    original=m.group(),
-                    masked=f"XXX-XX-{m.group(3)}",
-                )
+        return [
+            PiiMatch(
+                pii_type=match.pii_type,
+                start=match.start,
+                end=match.end,
+                original=text[match.start : match.end],
+                masked=mask_pii_match(text, match),
             )
-
-        # Account numbers: preserve last 4 digits
-        for m in _ACCOUNT_PATTERN.finditer(text):
-            full = m.group()
-            if len(full) >= 8:
-                matches.append(
-                    PiiMatch(
-                        pii_type="account_number",
-                        start=m.start(),
-                        end=m.end(),
-                        original=full,
-                        masked="X" * (len(full) - 4) + full[-4:],
-                    )
-                )
-
-        # Email
-        for m in _EMAIL_PATTERN.finditer(text):
-            local, domain = m.group().split("@")
-            masked_local = local[0] + "***" if local else "***"
-            matches.append(
-                PiiMatch(
-                    pii_type="email",
-                    start=m.start(),
-                    end=m.end(),
-                    original=m.group(),
-                    masked=f"{masked_local}@{domain}",
-                )
-            )
-
-        # Phone
-        for m in _PHONE_PATTERN.finditer(text):
-            matches.append(
-                PiiMatch(
-                    pii_type="phone",
-                    start=m.start(),
-                    end=m.end(),
-                    original=m.group(),
-                    masked="XXX-XXX-" + m.group()[-4:],
-                )
-            )
-
-        # DOB
-        for m in _DOB_PATTERN.finditer(text):
-            matched = m.group()
-            matches.append(
-                PiiMatch(
-                    pii_type="dob",
-                    start=m.start(),
-                    end=m.end(),
-                    original=matched,
-                    masked="XX/XX/XXXX",
-                )
-            )
-
-        return matches
+            for match in detect_pii(text)
+        ]
 
 
 class PiiMasker:
@@ -160,16 +91,10 @@ class PiiMasker:
             Text with all PII replaced by masked versions.
         """
         matches = self._detector.detect(text)
-        if not matches:
-            return text
-
-        # Sort by position (reverse) to replace from end to start
-        matches.sort(key=lambda m: m.start, reverse=True)
-        result = text
-        for match in matches:
-            result = result[: match.start] + match.masked + result[match.end :]
-
-        logger.debug("pii_masked", count=len(matches))
+        result = thaw_payload(mask_pii(text))
+        assert isinstance(result, str)
+        if matches:
+            logger.debug("pii_masked", count=len(matches))
         return result
 
     def mask_dict(self, data: dict[str, Any]) -> dict[str, Any]:
@@ -181,16 +106,6 @@ class PiiMasker:
         Returns:
             New dictionary with PII masked in all string values.
         """
-        result: dict[str, Any] = {}
-        for key, value in data.items():
-            if isinstance(value, str):
-                result[key] = self.mask_text(value)
-            elif isinstance(value, dict):
-                result[key] = self.mask_dict(value)
-            elif isinstance(value, list):
-                result[key] = [
-                    self.mask_text(item) if isinstance(item, str) else item for item in value
-                ]
-            else:
-                result[key] = value
+        result = thaw_payload(mask_pii(data))
+        assert isinstance(result, dict)
         return result

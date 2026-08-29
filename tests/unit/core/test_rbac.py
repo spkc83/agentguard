@@ -2,15 +2,10 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-
-import structlog
+from structlog.testing import capture_logs
 
 from agentguard.core.rbac import Permission, RBACEngine, Role
 from agentguard.models import AgentIdentity
-
-if TYPE_CHECKING:
-    import pytest
 
 
 def _identity(roles: list[str]) -> AgentIdentity:
@@ -207,18 +202,8 @@ class TestRBACEngine:
         assert ctx.requested_action == "tool:credit_check"
         assert ctx.resource == "bureau/experian"
 
-    def test_circular_inheritance_warns(self, capsys: pytest.CaptureFixture[str]) -> None:
+    def test_circular_inheritance_warns(self) -> None:
         """Circular role inheritance should log a warning, not crash."""
-        structlog.configure(
-            processors=[
-                structlog.processors.add_log_level,
-                structlog.dev.ConsoleRenderer(),
-            ],
-            wrapper_class=structlog.make_filtering_bound_logger(0),
-            context_class=dict,
-            logger_factory=structlog.PrintLoggerFactory(),
-            cache_logger_on_first_use=False,
-        )
         role_a = Role(
             name="role-a",
             permissions=[Permission(action="tool:a", resource="*", effect="allow")],
@@ -229,9 +214,9 @@ class TestRBACEngine:
             permissions=[Permission(action="tool:b", resource="*", effect="allow")],
             inherited_roles=["role-a"],
         )
-        RBACEngine(roles=[role_a, role_b])
-        captured = capsys.readouterr()
-        assert "circular_role_inheritance" in captured.out
+        with capture_logs() as logs:
+            RBACEngine(roles=[role_a, role_b])
+        assert any(log["event"] == "circular_role_inheritance" for log in logs)
 
     async def test_check_permission_terminates_with_cycle(self) -> None:
         """check_permission on a cyclic role graph must terminate with a deterministic result."""
@@ -250,3 +235,59 @@ class TestRBACEngine:
         ctx_b = await engine.check_permission(_identity(["role-a"]), "tool:b", "anywhere")
         assert ctx_a.granted is True
         assert ctx_b.granted is True
+
+
+class TestPermissionMatchingCaseSemantics:
+    """Resource matching is case-insensitive; action matching is exact-case.
+
+    A resource reaching RBAC is derived from tool arguments, so an attacker who
+    controls the casing must not be able to slip past a deny rule. Actions are
+    chosen by the integrator, so they stay exact to avoid silently widening a
+    policy.
+    """
+
+    def test_resource_case_variant_still_matches_deny_pattern(self) -> None:
+        perm = Permission(action="tool:*", resource="admin/*", effect="deny")
+        assert perm.matches("tool:delete", "Admin/keys") is True
+        assert perm.matches("tool:delete", "ADMIN/KEYS") is True
+
+    def test_uppercase_pattern_matches_lowercase_resource(self) -> None:
+        """A policy author writing ``Admin/*`` still governs ``admin/keys``."""
+        perm = Permission(action="tool:*", resource="Admin/*", effect="deny")
+        assert perm.matches("tool:delete", "admin/keys") is True
+
+    def test_action_matching_is_case_sensitive(self) -> None:
+        perm = Permission(action="tool:admin_delete", resource="*", effect="allow")
+        assert perm.matches("tool:admin_delete", "x") is True
+        assert perm.matches("tool:Admin_Delete", "x") is False
+        assert perm.matches("TOOL:ADMIN_DELETE", "x") is False
+
+    async def test_engine_denies_case_variant_resource(self) -> None:
+        engine = RBACEngine(
+            roles=[
+                Role(
+                    name="analyst",
+                    permissions=[
+                        Permission(action="tool:*", resource="*", effect="allow"),
+                        Permission(action="tool:*", resource="admin/*", effect="deny"),
+                    ],
+                )
+            ]
+        )
+        ctx = await engine.check_permission(_identity(["analyst"]), "tool:delete", "Admin/keys")
+        assert ctx.granted is False
+        assert "Explicit deny" in ctx.reason
+
+    async def test_engine_action_case_variant_does_not_match(self) -> None:
+        engine = RBACEngine(
+            roles=[
+                Role(
+                    name="analyst",
+                    permissions=[
+                        Permission(action="tool:admin_delete", resource="*", effect="allow"),
+                    ],
+                )
+            ]
+        )
+        ctx = await engine.check_permission(_identity(["analyst"]), "tool:Admin_Delete", "anything")
+        assert ctx.granted is False
