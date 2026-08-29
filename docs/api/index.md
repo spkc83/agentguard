@@ -42,9 +42,11 @@ The table marks which APIs participate in the current governed path.
 from agentguard.core.audit import (
     AppendOnlyAuditLog,
     AuditBackend,
+    AuditKeyring,
     ChainVerificationResult,
     FileAuditBackend,
 )
+from agentguard.core.audit_collector import AuditCollectorServer, SigningAuditBackend
 from agentguard.core.authentication import (
     AgentAuthenticator,
     AgentCredentialProvider,
@@ -93,7 +95,8 @@ from agentguard.core.sandbox import (
 
 | Module | Purpose | On governed path? |
 |--------|---------|-------------------|
-| `core.audit` | Local versioned HMAC chain/checkpoints through `AppendOnlyAuditLog`, plus the `AuditLog` application protocol used by local and collector clients. Schema v5 signs typed HITL evidence, schema v6 signs typed `ReconciliationEvidence`, schema v7 signs typed `AuthenticationEvidence`, and schema v8 signs typed `RegistryMutationEvidence`; historical v1-v7 records retain their exact signed forms. | Yes |
+| `core.audit` | Local versioned HMAC chain/checkpoints through `AppendOnlyAuditLog`, plus the `AuditLog` application protocol used by local and collector clients. Schema v5 signs typed HITL evidence, schema v6 signs typed `ReconciliationEvidence`, schema v7 signs typed `AuthenticationEvidence`, and schema v8 signs typed `RegistryMutationEvidence`; historical v1-v7 records retain their exact signed forms. `AGENTGUARD_AUDIT_KEY` must be ≥32 bytes (`AuditKeyWeakError`); `AGENTGUARD_AUDIT_KEYS` declares additional signing epochs for rotation continuity. A `trusted_checkpoint` witness turns a log rolled back behind it into `AuditRollbackDetectedError` (a subclass of `AuditTamperDetectedError`); `verify_checkpoint_signature()` authenticates a witness without binding it to history. | Yes |
+| `core.audit_collector` | `AuditCollectorServer` / `SigningAuditBackend`: out-of-process UDS signing so application processes never hold the key. Optional `trusted_checkpoint_path` (outside the state directory) is refused at startup when local history is behind it and is atomically re-exported after every checkpoint; `rotate_key` on an environment-sourced keyring refuses epochs not declared in `AGENTGUARD_AUDIT_KEYS` (`AuditKeyRotationRefusedError`); the full-event cache is bounded (`max_cached_events`) while duplicate detection stays complete. | Yes, when configured |
 | `core.authentication` | Mechanism-neutral async protocols and frozen credential-derived principals. Agent principals contain identity and validity facts but no roles/capabilities; the control-plane principal is a distinct type. | Yes, in secure kernel mode |
 | `core.jwt_authentication` | Optional offline RS256 verifier, immutable pinned key snapshots, pluggable key/replay state, atomic one-use token IDs, bounded key overlap, and emergency revocation. It performs no OIDC discovery or network key lookup. | Yes, when supplied to a secure kernel |
 | `core.registry` | Read-only protocols and deeply immutable active/revoked records. Roles, record revision, and credential epoch are registry-owned authorization state. | Yes, in secure kernel mode |
@@ -215,12 +218,12 @@ from agentguard.compliance.z3_models import (
 
 | Module | Purpose |
 |--------|---------|
-| `compliance.engine` | Staged YAML policy evaluator. Runtime stages inspect transformed inputs or actual results; attestation rules remain offline. `snapshot()` returns an immutable `PolicyBundle`; `await reload()` validates and atomically publishes a new content-addressed generation, returning `PolicyReloadResult`. Unknown check types and duplicate rule IDs raise `PolicyLoadError`; custom check types are registered via `PolicyEngine(extra_check_handlers={...})`. |
+| `compliance.engine` | Staged YAML policy evaluator. Runtime stages inspect transformed inputs or actual results; attestation rules remain offline. `snapshot()` returns an immutable `PolicyBundle`; `await reload()` validates and atomically publishes a new content-addressed generation, returning `PolicyReloadResult`. Unknown check types and duplicate rule IDs raise `PolicyLoadError`; custom check types are registered via `PolicyEngine(extra_check_handlers={...})`. `max_retained_generations` bounds retained history; a dropped generation fails report provenance resolution explicitly rather than substituting the active bundle. |
 | `compliance.formal_verifier` | Z3-backed RBAC reachability and policy-consistency checks. `verify_workflow_safety` is a breadth-first graph search, not Z3 (ADR-016). |
 | `compliance.hitl` | Callback-based escalation types. `HitlManager` has no call sites in the runtime — it is a library you drive yourself. |
 | `compliance.continuation` | Injected approver-authentication and continuation-protection protocols plus exact frozen PRE-execution and POST-delivery continuation schemas. The POST schema contains no executor reference. No plaintext/default protector ships. |
-| `compliance.escalation_store` | POSIX file-backed, HMAC-authenticated control state with verifier-only tokens, opaque protected envelopes, prepare→audit→commit decisions/expiry, disjoint execution/delivery claims, and mutually exclusive delivery terminals. |
-| `compliance.execution_journal` | Optional process-safe, signed claim journal with AEAD-protected exact outcomes. It records claimed, admitted, protected, completed, post-processing, `IN_DOUBT`, and terminal states without storing an executor reference or raw result. Executor exception, cancellation, and invalid-output paths commit durable `DELIVERY_DENIED`. |
+| `compliance.escalation_store` | POSIX file-backed, HMAC-authenticated control state with verifier-only tokens, opaque protected envelopes, prepare→audit→commit decisions/expiry, disjoint execution/delivery claims, and mutually exclusive delivery terminals. Operator-invoked `prune_terminal(older_than)` deletes only terminal records under the store lock. |
+| `compliance.execution_journal` | Optional process-safe, signed claim journal with AEAD-protected exact outcomes. It records claimed, admitted, protected, completed, post-processing, `IN_DOUBT`, and terminal states without storing an executor reference or raw result. Executor exception, cancellation, and invalid-output paths commit durable `DELIVERY_DENIED`. Operator-invoked `prune_terminal(older_than)` deletes only terminal records; set the cutoff beyond any reconciliation window (a pruned invocation reconciles as `CLAIMED`). |
 | `compliance.reporter` | JSON / Markdown attestation reports over a verified audit snapshot; shadow findings are separate from policy pass/failure metrics |
 
 Built-in policy bundles (35 rules total): `compliance/policies/owasp_agentic.yaml`
@@ -529,13 +532,18 @@ supplied its mode is already fixed and a second adapter-level mode is rejected.
 The complete command surface:
 
 ```
-agentguard audit show|verify|replay
+agentguard audit show|verify|replay|export-checkpoint
 agentguard policy validate|report
 agentguard verify rbac|policy
 agentguard observe dashboard|replay|summary
 ```
 
-`agentguard policy validate` takes `--policy-dir`, not `--file`. There is no
-`agentguard sandbox` command group.
+`agentguard audit export-checkpoint` writes the signed head checkpoint to
+stdout or an owner-only witness file (refusing to roll an existing witness
+back or rebind it to a forked chain); `agentguard audit verify
+--trusted-checkpoint <file>` reports ROLLBACK DETECTED with a nonzero exit
+when the local head is behind the witness. `agentguard policy validate`
+takes `--policy-dir`, not `--file`. There is no `agentguard sandbox` command
+group.
 
 See the top-level [`README.md`](../../README.md#cli) for flags and examples.

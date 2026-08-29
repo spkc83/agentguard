@@ -1,6 +1,6 @@
 # AgentGuard — Claude Code Context
 
-AgentGuard is an **open-source, framework-agnostic agent governance and security runtime** for AI agents in regulated industries. It provides security, compliance, and observability as a middleware layer — sitting between agent orchestration frameworks (LangGraph, CrewAI, Google ADK) and the tools/services they access, enforcing RBAC, HMAC-chained audit logging, and circuit breakers on the governed call path today, with policy-as-code compliance, PII masking, HITL, and sandboxed execution implemented as offline tools that are being moved onto the runtime path (`docs/plans/guardrails-realignment.md`). Financial services / credit risk is the flagship domain.
+AgentGuard is an **open-source, framework-agnostic agent governance and security runtime** for AI agents in regulated industries. It sits between agent orchestration frameworks (LangGraph, CrewAI, Google ADK, MCP, A2A) and the tools/services they access. The governed call path is owned by `agentguard.guardrails.GovernanceKernel`: authentication (optional JWT verifier + authoritative signed registry) → derived-resource RBAC → staged policy-as-code on real tool payloads → content guardrails (PII masking, secret egress) → audit-first admission (HMAC-chained, checkpointed, rollback-witness-anchored) → rate limits/circuit breakers → execution (optional hardened Docker sandbox obligations) → post-stage guardrails → delivery terminals, with restart-safe HITL escalation/resume and shadow mode. Formal verification (Z3), fairness monitoring, and compliance reporting run as offline evidence tools. The realignment history and remaining follow-ups live in `docs/plans/guardrails-realignment.md` §9. Financial services / credit risk is the flagship domain.
 
 ---
 
@@ -10,45 +10,76 @@ AgentGuard is an **open-source, framework-agnostic agent governance and security
 agentguard/
 ├── agentguard/                  # Main Python package
 │   ├── __init__.py
-│   ├── core/                    # Layer 1: Security Runtime (v0.2.0 complete)
-│   │   ├── rbac.py              # Role-based access control for agents
-│   │   ├── audit.py             # Immutable audit logger (append-only)
-│   │   ├── sandbox.py           # Sandboxed tool execution (Docker + NoOp)
-│   │   ├── circuit_breaker.py   # Circuit breaker + token bucket rate limiter
-│   │   └── identity.py          # Agent identity (in-memory + file-backed)
-│   ├── compliance/              # Layer 2: Compliance Engine (v0.3.0 complete)
-│   │   ├── engine.py            # Policy-as-code evaluator (6 check types)
-│   │   ├── formal_verifier.py   # Z3 SMT verification (RBAC, policy, workflow)
-│   │   ├── z3_models.py         # Z3 formula encodings for AgentGuard concepts
-│   │   ├── policies/            # Built-in policy YAML files (35 rules)
+│   ├── guardrails/              # Governance kernel — owns the governed call path
+│   │   ├── kernel.py            # GovernanceKernel: full lifecycle incl. HITL resume, sandbox obligations
+│   │   ├── chain.py             # GuardrailChain: enforce / shadow / off modes
+│   │   ├── contracts.py         # Guardrail protocol, payloads, stages, outcomes
+│   │   ├── content.py           # PII input masking, PII/secret egress denial, schema checks
+│   │   ├── config.py            # Declarative YAML guardrail composition
+│   │   ├── executors.py         # Trusted registered-executor resolution (HITL resume)
+│   │   ├── normalization.py     # Canonical JSON / payload freezing
+│   │   └── reason_codes.py      # Machine-stable runtime reason-code registry
+│   ├── core/                    # Layer 1: Security Runtime
+│   │   ├── rbac.py              # RBAC engine (deny-override, fnmatchcase, role inheritance)
+│   │   ├── audit.py             # HMAC-chained append-only log, checkpoints, key epochs, rollback witness
+│   │   ├── audit_collector.py   # Out-of-process UDS signing collector + external witness anchoring
+│   │   ├── authentication.py    # Mechanism-neutral agent / control-plane auth protocols
+│   │   ├── jwt_authentication.py # Optional offline RS256 verifier (agentguard[auth])
+│   │   ├── registry.py          # Authoritative in-memory agent registry (signed evidence)
+│   │   ├── registry_state.py    # Immutable registry records + revisions
+│   │   ├── registry_store.py    # Signed file-backed authoritative registry
+│   │   ├── registry_control_plane.py # Authenticated mutation ledger (prepare→audit→commit)
+│   │   ├── identity.py          # Legacy self-asserted registries (compatibility only)
+│   │   ├── sandbox.py           # Hardened Docker sandbox backend (used for kernel obligations)
+│   │   └── circuit_breaker.py   # Circuit breaker + token bucket rate limiter
+│   ├── compliance/              # Layer 2: Compliance Engine
+│   │   ├── engine.py            # Staged policy-as-code evaluator; content-addressed bundles, atomic reload
+│   │   ├── formal_verifier.py   # Z3 verification (fnmatch-sound RBAC, policy consistency; BFS workflow)
+│   │   ├── z3_models.py         # Z3 encodings (fnmatch → regex, role inheritance)
+│   │   ├── policies/            # Built-in bundles (35 rules: 3 deny, 3 escalate, 29 warn)
 │   │   │   ├── owasp_agentic.yaml   # OWASP Top 10 for Agentic AI (10 rules)
-│   │   │   ├── finos_aigf_v2.yaml   # FINOS AIGF v2.0 (15 rules)
+│   │   │   ├── finos_aigf_v2.yaml   # AG-FINOS-NNN local controls informed by FINOS AIGF (15 rules)
 │   │   │   └── eu_ai_act.yaml       # EU AI Act high-risk (10 rules)
-│   │   ├── hitl.py              # Human-in-the-loop escalation patterns
-│   │   └── reporter.py          # Compliance attestation report generator (JSON/Markdown)
-│   ├── domains/                 # Layer 3: Domain Toolkits (v0.4.0 complete)
+│   │   ├── escalation_store.py  # Durable HMAC-authenticated HITL escalation state + prune_terminal
+│   │   ├── execution_journal.py # Opt-in signed journal for protected continuations + prune_terminal
+│   │   ├── continuation.py      # AEAD-protected continuation envelopes (PRE/POST/journal)
+│   │   ├── hitl.py              # Offline HITL escalation patterns (legacy helpers)
+│   │   └── reporter.py          # Compliance attestation reports (JSON/Markdown)
+│   ├── domains/                 # Layer 3: Domain Toolkits
 │   │   └── finance/
 │   │       ├── credit_risk/
-│   │       │   ├── agent_templates.py   # Credit decisioning agent (auto/review/decline)
-│   │       │   ├── adverse_action.py    # ECOA/Reg B adverse action notice generation
-│   │       │   ├── model_validation.py  # Model validation workflow + findings
-│   │       │   └── fairness.py          # Disparate impact, equalized odds, calibration
-│   │       ├── synthetic/
-│   │       │   ├── wgan_gp.py           # WGAN-GP for tabular credit data (PyTorch)
-│   │       │   └── generators.py        # Statistical synthetic data generator
-│   │       └── pii.py                   # PII detection and masking (SSN, accounts, etc.)
-│   ├── observability/           # Layer 4: Observability (v1.0.0 complete)
-│   │   ├── tracer.py            # OTel-native agent decision traces (NoOp fallback)
-│   │   ├── replay.py            # Audit log replay debugger (filter, timeline, summarize)
-│   │   └── dashboard.py         # Aggregate metrics (denial rates, latency, policy trends)
-│   ├── integrations/            # Framework adapters (v0.5.0 complete)
-│   │   ├── _pipeline.py         # Shared governance pipeline (ADR-020) — used by all adapters
-│   │   ├── mcp_middleware.py    # MCP governed client (identity→RBAC→breaker→audit→call)
-│   │   ├── a2a_middleware.py    # A2A governed agent-to-agent messaging
-│   │   ├── langgraph.py         # GovernedLangGraphToolNode — governed tool node
-│   │   ├── crewai.py            # GovernedCrewAITool — governed CrewAI tool wrapper
-│   │   └── google_adk.py        # GovernedAdkTool — governed ADK tool wrapper
-│   └── cli.py                   # `agentguard` CLI entry point
+│   │       │   ├── governed_agent.py    # GovernedCreditAgent — kernel-governed decision workflow
+│   │       │   ├── agent_templates.py   # CreditDecisionCandidate / policy bands
+│   │       │   ├── decision_guardrails.py # Reason/attribution/policy/review integrity guardrails
+│   │       │   ├── decision_reasons.py  # CreditPolicyBundle + ReviewJudgment (non-model reasons)
+│   │       │   ├── attribution.py       # Truthful adverse-contribution attribution
+│   │       │   ├── reason_codes.py      # Versioned ECOA/FCRA reason registries (AG-RB-*)
+│   │       │   ├── adverse_action.py    # ECOA/Reg B notice artifacts + principal-reason selection
+│   │       │   ├── notice_governance.py # Governed notice preparation + completeness evidence
+│   │       │   ├── notice_renderer.py   # Deterministic Reg B notice rendering (verified body digest)
+│   │       │   ├── review_governance.py # HITL review lineage verification for overrides
+│   │       │   ├── audit_correlation.py # Unresolved-decline detection from signed evidence
+│   │       │   ├── model_validation.py  # Strict revisioned validation reports (signed envelope)
+│   │       │   ├── model_governance.py  # ModelProvenanceGuardrail + signed-report provider
+│   │       │   ├── fairness.py          # DI (4/5ths), equalized odds, calibration, exact tests
+│   │       │   └── fairness_monitor.py  # Checkpoint-verified private-join fairness monitoring
+│   │       ├── synthetic/               # Compatibility re-exports of agentguard.testing
+│   │       └── pii.py                   # Finance PII API (delegates to guardrails content masking)
+│   ├── testing/                 # Synthetic credit benchmarks (seeded, deterministic)
+│   │   ├── synthetic.py         # Statistical generator with explicit bias controls
+│   │   └── wgan_gp.py           # Optional WGAN-GP (torch; agentguard[finance])
+│   ├── observability/           # Layer 4: Observability
+│   │   ├── tracer.py            # OTel-native traces (NoOp fallback)
+│   │   ├── replay.py            # Audit log replay debugger
+│   │   └── dashboard.py         # Aggregate metrics incl. shadow/HITL views
+│   ├── integrations/            # Framework adapters — all construct through the kernel
+│   │   ├── _pipeline.py         # Deprecated run_governed shim + shared kernel construction
+│   │   ├── mcp_middleware.py    # Governed MCP client (native CallToolResult denials)
+│   │   ├── a2a_middleware.py    # Governed A2A messaging (canonicalise-once target)
+│   │   ├── langgraph.py         # GovernedLangGraphToolNode (native messages-state node)
+│   │   ├── crewai.py            # GovernedCrewAITool (native BaseTool when installed)
+│   │   └── google_adk.py        # GovernedAdkTool (native FunctionTool export)
+│   └── cli.py                   # `agentguard` CLI (audit incl. export-checkpoint, policy, verify, observe)
 ├── tests/
 │   ├── unit/                    # Fast unit tests (count/coverage reported by CI; do not pin here)
 │   ├── integration/             # Docker sandbox integration tests
@@ -169,22 +200,24 @@ python examples/quickstart.py
 
 ---
 
-## Layer Build Order (Follow This Sequence)
+## Dependency Order (for understanding and changing the stack)
 
-Build in this exact order — later layers depend on earlier ones:
+All layers are built; change code with this dependency order in mind — lower
+items must never import from higher ones:
 
-1. **`agentguard/core/audit.py`** — everything depends on audit logging; build this first
-2. **`agentguard/core/identity.py`** — agent identity needed by RBAC
-3. **`agentguard/core/rbac.py`** — needs identity; needed by sandbox and integrations
-4. **`agentguard/core/circuit_breaker.py`** — standalone; add after RBAC
-5. **`agentguard/core/sandbox.py`** — needs RBAC + audit; Docker-based
-6. **`agentguard/integrations/mcp_middleware.py`** — wraps MCP calls with core layer
-7. **`agentguard/compliance/engine.py`** — policy evaluator; needs audit
-8. **`agentguard/compliance/formal_verifier.py`** — Z3-based formal policy verifier; needs engine
-9. **`agentguard/compliance/policies/*.yaml`** — OWASP, FINOS, EU AI Act rules
-10. **`agentguard/domains/finance/`** — credit risk templates, synthetic data, adverse action
-11. **`agentguard/observability/`** — traces, replay, dashboard
-12. **`agentguard/integrations/langgraph.py`** — framework adapters last
+1. **`agentguard/core/audit.py` + `audit_collector.py`** — the evidence root of trust; everything writes here
+2. **`agentguard/core/{authentication,registry*,identity}.py`** — who the agent is (authoritative vs legacy)
+3. **`agentguard/core/rbac.py`** — what the agent may do; consumes canonicalised action/resource only
+4. **`agentguard/compliance/engine.py` + `policies/*.yaml`** — staged policy on real payloads
+5. **`agentguard/guardrails/`** — the kernel composes 1–4 plus content guardrails, limits, sandbox obligations, and HITL (`compliance/{escalation_store,execution_journal,continuation}.py`)
+6. **`agentguard/integrations/`** — adapters construct through the kernel; never bypass it
+7. **`agentguard/domains/finance/`** — domain guardrails and evidence plug into the kernel's `ON_DECISION` stage
+8. **`agentguard/observability/`** — reads signed evidence; never on the enforcement path
+9. **`agentguard/compliance/{formal_verifier,reporter}.py`, `agentguard/testing/`** — offline tools over the same artifacts
+
+Before adding any feature, check it is reachable from the governed path — the
+requirements ledger and execution log in `docs/plans/guardrails-realignment.md`
+are the definition of done.
 
 ---
 
