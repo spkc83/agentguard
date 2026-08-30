@@ -104,9 +104,6 @@ agentguard/
 ├── pyproject.toml
 ├── README.md
 └── .github/
-    ├── workflows/
-    │   ├── ci.yml
-    │   └── publish.yml
     └── ISSUE_TEMPLATE/
 ```
 
@@ -163,7 +160,7 @@ mypy = "*"
 - **Branch naming:** `feat/rbac-engine`, `fix/sandbox-timeout`, `docs/mcp-guide`
 - **Commit format:** Conventional Commits — `feat:`, `fix:`, `docs:`, `test:`, `refactor:`, `chore:`
 - **Never commit** secrets, API keys, or real PII data
-- **Every PR** must have tests; CI blocks merge without passing tests
+- **Every PR** must have tests; run the full gate locally before merging (`ruff check . && ruff format --check . && mypy agentguard/ && pytest tests/unit/`) — there is no hosted CI on this repo
 
 ---
 
@@ -290,8 +287,8 @@ The owner has 17 years of finance domain experience. Reference these correctly:
 
 AgentGuard is a security tool — it must be secure:
 
-- Dependency scanning in CI via `pip-audit`
+- Dependency scanning via `pip-audit` (run locally/pre-release; no hosted CI)
 - No `eval()`, `exec()`, or `subprocess.shell=True` in library code
 - Sandbox escapes are the #1 threat model — test this explicitly in `tests/red_team/`
 - Secrets must never appear in logs — use `structlog` processors to scrub known patterns
-- SBOM generation in release workflow via `syft`
+- SBOM generation at release time via `syft` (run locally; no hosted release workflow)

@@ -90,8 +90,10 @@ Each adapter degrades gracefully to a duck-typed wrapper when its framework
 is not installed, and binds to the native framework surface when it is
 (lazy imports: `langchain-core` `ToolMessage`s, CrewAI `BaseTool`
 subclassing, ADK `FunctionTool` export, `mcp.types` error results; the A2A
-adapter is fully framework-independent). The native boundaries run in CI
-against the real frameworks via the adapter-extras matrix:
+adapter is fully framework-independent). Native-boundary tests against the
+real frameworks live in `tests/unit/integrations/test_real_adapters.py` and
+run when the matching extra is installed (`uv sync --extra dev --extra
+<langgraph|crewai|adk|mcp>`):
 
 | Component | Description |
 |-----------|-------------|
@@ -101,7 +103,7 @@ against the real frameworks via the adapter-extras matrix:
 | MCP | `GovernedMcpClient` |
 | A2A | `GovernedA2AClient` |
 
-Unit tests run with `pytest tests/unit/` (coverage gate: 80% in CI; current run is reported in the job log).
+Unit tests run with `pytest tests/unit/` (coverage gate: 80%, enforced by the pytest configuration).
 
 ## Quickstart
 

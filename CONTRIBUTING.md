@@ -16,7 +16,7 @@ source .venv/bin/activate
 # Install in editable mode with dev dependencies
 pip install -e ".[dev]"
 
-# Alternatively, with uv (what CI's extras matrix uses; uv.lock pins the dev
+# Alternatively, with uv (uv.lock pins the dev
 # environment — dependency metadata for consumers still comes from pyproject.toml):
 #   uv sync --extra dev
 
