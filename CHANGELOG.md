@@ -8,7 +8,13 @@ reaches 1.0.
 
 ## [Unreleased]
 
-### Changed (2026-08-30) — BREAKING for `AGENTGUARD_AUDIT_KEYS`
+## [0.9.0] - 2026-08-31
+
+The guardrails realignment: AgentGuard moves from a governance decorator to a
+live guardrails engine. See `docs/plans/guardrails-realignment.md` for the full
+history; the entries below are the changes since the 0.9.0 alpha packaging reset.
+
+### Changed (2026-08-31) — BREAKING for `AGENTGUARD_AUDIT_KEYS`
 
 - Every epoch declared in `AGENTGUARD_AUDIT_KEYS` must now carry an
   `activation_certificate`: an HMAC (domain
@@ -313,7 +319,10 @@ reaches 1.0.
   are no longer described in the present tense.
 
 
-## [0.9.0] - 2026-08-22
+## [0.9.0a1] - 2026-08-22
+
+The Phase 0 truth-and-hygiene alpha (packaging reset and honest documentation),
+superseded within the 0.9.0 line by the realignment above.
 
 ### Changed
 
