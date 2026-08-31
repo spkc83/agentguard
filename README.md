@@ -300,18 +300,26 @@ same log directory.
 #### Rotating the audit signing key
 
 Key bytes live only in the environment, so an epoch the environment does not declare cannot be
-rebuilt after a restart. Declare the next epoch first, then activate it:
+rebuilt after a restart — and the environment alone is not trusted to introduce one: every
+declared epoch must carry an `activation_certificate`, an HMAC under the PREDECESSOR epoch's key,
+so declaring a new epoch requires holding the current one. Mint the entry, then declare it, then
+activate it:
 
 ```bash
 export AGENTGUARD_AUDIT_KEY=$(python -c "import secrets; print(secrets.token_hex(32))")
-# Declare epoch 2 before rotating; activation_sequence is where it takes effect.
-export AGENTGUARD_AUDIT_KEYS='{"epoch-2": {"key": "<32+ byte key>", "activation_sequence": 900}}'
+# Mint the certified entry for epoch 2 (activation_sequence is where it takes
+# effect). The new key is read from AGENTGUARD_NEW_AUDIT_KEY, never an argument;
+# stdout contains the new key, so capture it carefully.
+export AGENTGUARD_NEW_AUDIT_KEY=$(python -c "import secrets; print(secrets.token_hex(32))")
+agentguard audit mint-epoch-certificate --key-id epoch-2 --activation-sequence 900
+# Merge the printed JSON entry into AGENTGUARD_AUDIT_KEYS, then unset AGENTGUARD_NEW_AUDIT_KEY.
 ```
 
-`AuditCollectorServer.rotate_key` refuses an epoch that `AGENTGUARD_AUDIT_KEYS` does not declare,
-so the one-way door — post-rotation events that no restart can verify — cannot be opened by
-accident. Keep every past epoch in the variable for as long as you need to verify events signed
-under it.
+A declaration whose certificate does not verify against its predecessor fails closed at startup,
+and `AuditCollectorServer.rotate_key` refuses an epoch that `AGENTGUARD_AUDIT_KEYS` does not
+declare, so the one-way door — post-rotation events that no restart can verify — cannot be opened
+by accident. Keep every past epoch in the variable for as long as you need to verify events
+signed under it.
 
 Adding an epoch to a collector that is already running against committed state requires
 `AuditCollectorServer(..., adopt_declared_epochs=True)` for that start: the declaration is not

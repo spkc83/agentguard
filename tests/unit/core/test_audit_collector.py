@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import struct
@@ -16,7 +17,7 @@ from typing import Any
 
 import pytest
 
-from agentguard.core.audit import AppendOnlyAuditLog, FileAuditBackend
+from agentguard.core.audit import AppendOnlyAuditLog, AuditKeyring, FileAuditBackend
 from agentguard.core.audit_collector import AuditCollectorServer, SigningAuditBackend
 from agentguard.exceptions import (
     AuditCollectorOwnershipError,
@@ -140,9 +141,24 @@ async def declaring_collector(
     """A collector whose environment already declares the next signing epoch."""
 
     monkeypatch.setenv("AGENTGUARD_AUDIT_KEY", "collector-test-key-0123456789abcdef")
+    primary = "collector-test-key-0123456789abcdef"
     monkeypatch.setenv(
         "AGENTGUARD_AUDIT_KEYS",
-        json.dumps({_ROTATED_KEY_ID: {"key": _ROTATED_KEY, "activation_sequence": 2}}),
+        json.dumps(
+            {
+                _ROTATED_KEY_ID: {
+                    "key": _ROTATED_KEY,
+                    "activation_sequence": 2,
+                    "activation_certificate": AuditKeyring._epoch_activation_certificate(
+                        predecessor_key=primary.encode(),
+                        predecessor_key_id=hashlib.sha256(primary.encode()).hexdigest()[:16],
+                        key_id=_ROTATED_KEY_ID,
+                        key=_ROTATED_KEY.encode(),
+                        activation_sequence=2,
+                    ),
+                }
+            }
+        ),
     )
     socket_path = tmp_path / "run" / "collector.sock"
     server = AuditCollectorServer(

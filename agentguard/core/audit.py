@@ -401,6 +401,9 @@ _MIN_AUDIT_KEY_BYTES = 32
 _AUDIT_KEYS_ENV = "AGENTGUARD_AUDIT_KEYS"
 """Optional JSON declaration of signing epochs beyond the primary legacy key."""
 
+_EPOCH_CERTIFICATE_DOMAIN = b"agentguard.audit.key-epoch-activation.v1\x00"
+"""Domain tag for epoch activation certificates (HMAC under the predecessor key)."""
+
 
 def _event_fingerprint(event: AuditEvent) -> bytes:
     """Canonical unsigned content used to make stable event IDs idempotent."""
@@ -554,8 +557,20 @@ class AuditKeyring:
 
         ``AGENTGUARD_AUDIT_KEY`` always supplies epoch 1 (the legacy key).
         ``AGENTGUARD_AUDIT_KEYS`` optionally declares later epochs as a JSON
-        object mapping ``key_id`` to ``{"key": ..., "activation_sequence": ...}``,
-        so a process restarted after a rotation can still verify every event.
+        object mapping ``key_id`` to ``{"key": ..., "activation_sequence": ...,
+        "activation_certificate": ...}``, so a process restarted after a
+        rotation can still verify every event.
+
+        The environment is NOT trusted to introduce signing epochs on its own:
+        every declared epoch must carry an ``activation_certificate`` — an
+        HMAC over the epoch's binding keyed by the PREDECESSOR epoch's key
+        (the primary key for the first declared epoch, then each declared
+        epoch in activation order). An attacker with environment write access
+        but no existing signing key cannot mint a certificate, so an epoch
+        declaration is proof of authorization by the previous key holder, not
+        merely presence in the environment. Mint certificates with
+        :meth:`mint_activation_certificate` or ``agentguard audit
+        mint-epoch-certificate``.
 
         Returns:
             An immutable keyring whose epochs are ordered by activation sequence.
@@ -563,7 +578,8 @@ class AuditKeyring:
         Raises:
             AuditKeyMissingError: If AGENTGUARD_AUDIT_KEY is not set.
             AuditKeyWeakError: If any declared key is below the key-length floor.
-            AuditKeyEnvironmentError: If AGENTGUARD_AUDIT_KEYS is malformed.
+            AuditKeyEnvironmentError: If AGENTGUARD_AUDIT_KEYS is malformed or
+                any activation certificate does not verify.
         """
 
         key_text = os.environ.get("AGENTGUARD_AUDIT_KEY", "")
@@ -588,7 +604,7 @@ class AuditKeyring:
                 key_fingerprint=hashlib.sha256(key).hexdigest(),
             )
         ]
-        for extra_id, extra_key, activation in cls._declared_environment_epochs(key_id):
+        for extra_id, extra_key, activation in cls._declared_environment_epochs(key_id, key):
             keys[extra_id] = extra_key
             epochs.append(
                 AuditKeyEpoch(
@@ -607,11 +623,14 @@ class AuditKeyring:
     @staticmethod
     def _declared_environment_epochs(
         legacy_key_id: str,
+        legacy_key: bytes,
     ) -> tuple[tuple[str, bytes, int], ...]:
         """Parse AGENTGUARD_AUDIT_KEYS into ``(key_id, key, activation)`` triples.
 
-        Every structural problem fails closed. No key material — not even a
-        prefix — is placed in any raised message.
+        Every structural problem fails closed, and every declared epoch's
+        ``activation_certificate`` is verified against its predecessor's key
+        in activation order before the epoch is trusted. No key material —
+        not even a prefix — is placed in any raised message.
         """
 
         raw = os.environ.get(_AUDIT_KEYS_ENV, "").strip()
@@ -623,19 +642,22 @@ class AuditKeyring:
             raise AuditKeyEnvironmentError("value is not valid JSON") from exc
         if not isinstance(declared, dict):
             raise AuditKeyEnvironmentError("value must be a JSON object of key IDs")
-        parsed: list[tuple[str, bytes, int]] = []
+        parsed: list[tuple[str, bytes, int, str]] = []
         activations = {1}
+        required_fields = {"key", "activation_sequence", "activation_certificate"}
         for declared_id, entry in declared.items():
             if not declared_id:
                 raise AuditKeyEnvironmentError("key IDs must not be empty")
             if declared_id == legacy_key_id:
                 raise AuditKeyEnvironmentError(f"key ID {declared_id!r} rebinds the primary key")
-            if not isinstance(entry, dict) or set(entry) != {"key", "activation_sequence"}:
+            if not isinstance(entry, dict) or set(entry) != required_fields:
                 raise AuditKeyEnvironmentError(
-                    f"entry {declared_id!r} must declare exactly 'key' and 'activation_sequence'"
+                    f"entry {declared_id!r} must declare exactly 'key', "
+                    "'activation_sequence', and 'activation_certificate'"
                 )
             key_text = entry["key"]
             activation = entry["activation_sequence"]
+            certificate = entry["activation_certificate"]
             if not isinstance(key_text, str) or not key_text:
                 raise AuditKeyEnvironmentError(f"entry {declared_id!r} has a non-string key")
             if not isinstance(activation, int) or isinstance(activation, bool):
@@ -650,12 +672,121 @@ class AuditKeyring:
                 raise AuditKeyEnvironmentError(
                     f"entry {declared_id!r} reuses activation_sequence {activation}"
                 )
+            if not isinstance(certificate, str) or not certificate:
+                raise AuditKeyEnvironmentError(
+                    f"entry {declared_id!r} has a non-string activation_certificate"
+                )
+            # Reject anything that is not a canonical HMAC-SHA256 digest before
+            # comparing: hmac.compare_digest raises TypeError (not a clean
+            # AuditKeyEnvironmentError) on a non-ASCII string, and a malformed
+            # certificate can never verify anyway.
+            if len(certificate) != 64 or any(ch not in "0123456789abcdef" for ch in certificate):
+                raise AuditKeyEnvironmentError(
+                    f"entry {declared_id!r} has a malformed activation_certificate"
+                )
             key = key_text.encode("utf-8")
             if len(key) < _MIN_AUDIT_KEY_BYTES:
                 raise AuditKeyWeakError(minimum_bytes=_MIN_AUDIT_KEY_BYTES)
             activations.add(activation)
-            parsed.append((declared_id, key, activation))
-        return tuple(parsed)
+            parsed.append((declared_id, key, activation, certificate))
+
+        # Verify the certificate chain in activation order: the first declared
+        # epoch is certified by the primary key, each later one by the epoch
+        # before it. Verification happens only after full structural parsing
+        # so the predecessor of every epoch is known.
+        parsed.sort(key=lambda item: item[2])
+        predecessor_id, predecessor_key = legacy_key_id, legacy_key
+        for declared_id, key, activation, certificate in parsed:
+            expected = AuditKeyring._epoch_activation_certificate(
+                predecessor_key=predecessor_key,
+                predecessor_key_id=predecessor_id,
+                key_id=declared_id,
+                key=key,
+                activation_sequence=activation,
+            )
+            if not hmac.compare_digest(expected, certificate):
+                raise AuditKeyEnvironmentError(
+                    f"entry {declared_id!r} has an activation certificate that does not "
+                    f"verify under predecessor {predecessor_id!r}"
+                )
+            predecessor_id, predecessor_key = declared_id, key
+        return tuple((declared_id, key, activation) for declared_id, key, activation, _ in parsed)
+
+    @staticmethod
+    def _epoch_activation_certificate(
+        *,
+        predecessor_key: bytes,
+        predecessor_key_id: str,
+        key_id: str,
+        key: bytes,
+        activation_sequence: int,
+    ) -> str:
+        """Compute the HMAC certificate binding one epoch to its predecessor.
+
+        The binding covers the key FINGERPRINT, never the key itself, so the
+        certificate discloses nothing about the new key material.
+        """
+
+        binding = json.dumps(
+            {
+                "activation_sequence": activation_sequence,
+                "key_fingerprint": hashlib.sha256(key).hexdigest(),
+                "key_id": key_id,
+                "predecessor_key_id": predecessor_key_id,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8")
+        return hmac.new(
+            predecessor_key, _EPOCH_CERTIFICATE_DOMAIN + binding, hashlib.sha256
+        ).hexdigest()
+
+    def mint_activation_certificate(
+        self,
+        *,
+        key_id: str,
+        key: bytes,
+        activation_sequence: int,
+    ) -> str:
+        """Mint the activation certificate for the NEXT declared epoch.
+
+        The predecessor is this keyring's latest epoch, so the caller must
+        hold the current keyring (and therefore its key material) — exactly
+        the authority the certificate is meant to prove. The result belongs in
+        the epoch's ``activation_certificate`` field in AGENTGUARD_AUDIT_KEYS.
+
+        The keyring must already contain EVERY current epoch: minting from a
+        keyring built with an incomplete ``AGENTGUARD_AUDIT_KEYS`` chains the
+        new epoch to whatever its latest epoch happens to be (the primary, if
+        no rotations are declared), producing a declaration that — used alone —
+        silently orphans the live epochs.
+
+        Raises:
+            ValueError: If the key ID is empty or already bound, or the
+                activation sequence does not strictly follow the latest epoch.
+            AuditKeyWeakError: If the new key is below the key-length floor.
+        """
+
+        if not key_id:
+            raise ValueError("key_id must not be empty")
+        if key_id in self._keys:
+            raise ValueError(f"audit key ID {key_id!r} cannot be rebound")
+        if len(key) < _MIN_AUDIT_KEY_BYTES:
+            raise AuditKeyWeakError(minimum_bytes=_MIN_AUDIT_KEY_BYTES)
+        latest = self._epochs[-1]
+        if activation_sequence <= latest.activation_sequence:
+            raise ValueError(
+                "activation_sequence must strictly follow the latest epoch "
+                f"(> {latest.activation_sequence})"
+            )
+        return self._epoch_activation_certificate(
+            predecessor_key=self._keys[latest.key_id],
+            predecessor_key_id=latest.key_id,
+            key_id=key_id,
+            key=key,
+            activation_sequence=activation_sequence,
+        )
 
     def key_for_id(self, key_id: str) -> bytes:
         try:

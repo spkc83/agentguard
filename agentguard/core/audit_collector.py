@@ -960,9 +960,12 @@ class AuditCollectorServer:
         if not added or epochs[: len(stored.key_epochs)] != stored.key_epochs:
             raise AuditCollectorOwnershipError("collector key epochs differ from signed state")
         if not self._adopt_declared_epochs:
-            # The environment declaration is unauthenticated, so committing it
-            # into signed state is a deliberate operator action, never a
-            # side effect of a restart that happens to see a new variable.
+            # Each declared epoch is authenticated by a predecessor-keyed
+            # activation certificate, but committing new epochs into signed
+            # state is still a deliberate operator action, never a side effect
+            # of a restart that happens to see a new variable — defense in
+            # depth, and it also prevents a certificate-valid but unintended
+            # declaration from silently reshaping the committed epoch set.
             raise AuditCollectorOwnershipError(
                 "signed state does not commit the declared audit key epochs; "
                 "explicit adoption required"

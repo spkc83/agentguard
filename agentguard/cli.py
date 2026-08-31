@@ -6,6 +6,7 @@ Entry point: `agentguard` (configured in pyproject.toml).
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import tempfile
 from datetime import UTC, datetime
@@ -199,6 +200,63 @@ def audit_export_checkpoint(
         )
 
     asyncio.run(_export())
+
+
+@audit_app.command("mint-epoch-certificate")
+def audit_mint_epoch_certificate(
+    key_id: str = typer.Option(..., "--key-id", help="Identifier for the NEW signing epoch."),
+    activation_sequence: int = typer.Option(
+        ...,
+        "--activation-sequence",
+        help="First audit sequence the new epoch signs; must strictly follow the latest epoch.",
+    ),
+) -> None:
+    """Mint the activation certificate authorizing the next signing epoch.
+
+    The current environment must hold the existing keyring
+    (``AGENTGUARD_AUDIT_KEY`` plus any already-certified
+    ``AGENTGUARD_AUDIT_KEYS`` epochs) — the certificate is an HMAC under the
+    latest epoch's key, which is what makes an epoch declaration proof of
+    authorization rather than mere presence in the environment. The NEW key is
+    read from ``AGENTGUARD_NEW_AUDIT_KEY`` (never from an argument, so key
+    material stays out of shell history and process listings). Prints the
+    complete JSON entry to merge into ``AGENTGUARD_AUDIT_KEYS``; treat stdout
+    as sensitive — it contains the new key.
+
+    The current environment must declare EVERY existing epoch in
+    ``AGENTGUARD_AUDIT_KEYS`` before minting: the certificate chains to the
+    latest declared epoch, so minting with an incomplete or unset
+    ``AGENTGUARD_AUDIT_KEYS`` chains to the primary key and the resulting entry,
+    used alone, would orphan the live epochs.
+    """
+    from agentguard.core.audit import AuditKeyring
+    from agentguard.exceptions import AuditError
+
+    new_key_text = os.environ.get("AGENTGUARD_NEW_AUDIT_KEY", "")
+    if not new_key_text:
+        console.print(
+            "[red]AGENTGUARD_NEW_AUDIT_KEY is not set.[/red] Export the new key there "
+            'first: python -c "import secrets; print(secrets.token_hex(32))"'
+        )
+        raise typer.Exit(code=1)
+    try:
+        keyring = AuditKeyring.from_environment()
+        certificate = keyring.mint_activation_certificate(
+            key_id=key_id,
+            key=new_key_text.encode("utf-8"),
+            activation_sequence=activation_sequence,
+        )
+    except (AuditError, ValueError) as e:
+        console.print(f"[red]Certificate refused:[/red] {e}")
+        raise typer.Exit(code=1) from None
+    entry = {
+        key_id: {
+            "key": new_key_text,
+            "activation_sequence": activation_sequence,
+            "activation_certificate": certificate,
+        }
+    }
+    typer.echo(json.dumps(entry))
 
 
 @audit_app.command("verify")

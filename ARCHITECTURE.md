@@ -293,7 +293,8 @@ window, and the witness must be replicated to storage the audit host cannot writ
 #### Signing-key epoch continuity
 
 `AGENTGUARD_AUDIT_KEY` supplies epoch 1. `AGENTGUARD_AUDIT_KEYS` optionally declares later
-epochs as a JSON object mapping `key_id` to `{"key": ..., "activation_sequence": ...}`,
+epochs as a JSON object mapping `key_id` to
+`{"key": ..., "activation_sequence": ..., "activation_certificate": ...}`,
 subject to the same >=32-byte floor. This declaration is what makes rotation survivable:
 key bytes exist only in the environment, so an epoch the environment does not declare
 cannot be rebuilt after a restart and every event signed under it becomes unverifiable.
@@ -301,18 +302,41 @@ cannot be rebuilt after a restart and every event signed under it becomes unveri
 environment-sourced keyring (`AuditKeyRotationRefusedError`) rather than opening that
 one-way door; a caller-injected keyring owns its own continuity and still rotates in place.
 
-The declaration is **unauthenticated** — an epoch is trusted because it appears in the
-environment, not because anything signed it. Write access to the process environment is
-therefore equivalent to audit-key custody: whoever can set `AGENTGUARD_AUDIT_KEYS` can
-introduce a signing epoch and forge events that verify under it. This is not a new
-boundary (`AGENTGUARD_AUDIT_KEY` is read from the same place), but it does mean the
-variable must be protected exactly as the key is. To keep an environment edit from
-silently becoming durable, a restart that sees newly declared epochs refuses to start
-unless the operator passes `adopt_declared_epochs=True`; adoption then commits them into
-signed state only as a strict suffix extension whose activations fall after the committed
-head, so no already-signed event can be reinterpreted. Binding declarations to the
-predecessor epoch with an activation certificate would close the trust gap and remains
-open.
+Every declared epoch is **authenticated by an activation certificate**: an HMAC
+(domain `agentguard.audit.key-epoch-activation.v1`) over the epoch's binding —
+key ID, key *fingerprint* (never the key itself), activation sequence, and
+predecessor key ID — keyed by the PREDECESSOR epoch's key. The first declared
+epoch is certified by the primary key; each later epoch by the one before it in
+activation order, so the chain is sequential and a link cannot be skipped. An
+epoch declaration is therefore proof of authorization by the previous key
+holder, not mere presence in the environment: an attacker with environment
+write access but no existing signing key cannot mint a certificate, and a
+stolen certificate cannot be rebound to a different key, sequence, or
+predecessor. Mint certificates with
+`AuditKeyring.mint_activation_certificate(...)` or
+`agentguard audit mint-epoch-certificate` (the new key is read from
+`AGENTGUARD_NEW_AUDIT_KEY`, never from an argument).
+
+Residual boundary — what the certificate does NOT defend. `AGENTGUARD_AUDIT_KEY`
+itself carries no certificate, so custody of the *primary* key remains an
+environment-protection problem. The certificate chain stops environment write
+access from escalating into new signing epochs; it does not stop an attacker who
+supplies their own primary key. Against an **existing** log that swap is caught —
+substituting the primary breaks the chain from event 1 and verification raises
+`AuditTamperDetectedError`. Against a **fresh** log it is not: an attacker who
+sets `AGENTGUARD_AUDIT_KEY` to a key of their choosing and writes a new log from
+sequence 1 produces a chain that verifies clean under their key. Only the
+off-host trusted checkpoint / collector signed state (whose `signing_key_id` and
+head the attacker cannot reproduce) detects a re-rooted fresh log — replicate the
+checkpoint witness, do not rely on chain self-verification alone. Likewise,
+possession of any key that is or was a chain predecessor, combined with dropping
+later `AGENTGUARD_AUDIT_KEYS` declarations, can still mint an epoch; the
+collector's signed epoch state (the strict-suffix prefix check) contains this,
+the certificate does not. Defense in depth on top of the certificate: a restart
+that sees newly declared epochs still refuses to start unless the operator passes
+`adopt_declared_epochs=True`, and adoption commits them into signed state only as
+a strict suffix extension whose activations fall after the committed head, so no
+already-signed event can be reinterpreted.
 
 New writes use schema v8. Its domain-separated canonical envelope signs typed
 `RegistryMutationEvidence` in addition to the v4 guardrail, v5 HITL, v6 reconciliation, and v7

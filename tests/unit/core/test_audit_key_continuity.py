@@ -52,8 +52,62 @@ def _event(event_id: str) -> AuditEvent:
     )
 
 
-def _declare(activation: int, *, key: str = _SECOND, key_id: str = _SECOND_ID) -> str:
-    return json.dumps({key_id: {"key": key, "activation_sequence": activation}})
+def _primary_id() -> str:
+    return hashlib.sha256(_PRIMARY.encode()).hexdigest()[:16]
+
+
+def _cert(
+    key_id: str,
+    key: str,
+    activation: int,
+    *,
+    predecessor_id: str | None = None,
+    predecessor_key: str = _PRIMARY,
+) -> str:
+    return AuditKeyring._epoch_activation_certificate(
+        predecessor_key=predecessor_key.encode(),
+        predecessor_key_id=predecessor_id or _primary_id(),
+        key_id=key_id,
+        key=key.encode(),
+        activation_sequence=activation,
+    )
+
+
+def _entry(
+    activation: int,
+    *,
+    key: str = _SECOND,
+    key_id: str = _SECOND_ID,
+    primary_key_id: str | None = None,
+    certificate: str | None = None,
+) -> dict[str, object]:
+    return {
+        "key": key,
+        "activation_sequence": activation,
+        "activation_certificate": certificate
+        or _cert(key_id, key, activation, predecessor_id=primary_key_id),
+    }
+
+
+def _declare(
+    activation: int,
+    *,
+    key: str = _SECOND,
+    key_id: str = _SECOND_ID,
+    primary_key_id: str | None = None,
+    certificate: str | None = None,
+) -> str:
+    return json.dumps(
+        {
+            key_id: _entry(
+                activation,
+                key=key,
+                key_id=key_id,
+                primary_key_id=primary_key_id,
+                certificate=certificate,
+            )
+        }
+    )
 
 
 def _injected_keyring(key: bytes, *, key_id: str = "injected-legacy") -> AuditKeyring:
@@ -75,7 +129,7 @@ def test_environment_keyring_declares_additional_epochs(
 ) -> None:
     monkeypatch.setenv("AGENTGUARD_AUDIT_KEY", _PRIMARY)
     monkeypatch.setenv("AGENTGUARD_AUDIT_KEY_ID", "epoch-1")
-    monkeypatch.setenv("AGENTGUARD_AUDIT_KEYS", _declare(7))
+    monkeypatch.setenv("AGENTGUARD_AUDIT_KEYS", _declare(7, primary_key_id="epoch-1"))
 
     keyring = AuditKeyring.from_environment()
 
@@ -96,8 +150,20 @@ def test_environment_keyring_orders_declared_epochs_by_activation(
         "AGENTGUARD_AUDIT_KEYS",
         json.dumps(
             {
-                "epoch-late": {"key": _SECOND, "activation_sequence": 9},
-                "epoch-early": {"key": _SECOND + "x", "activation_sequence": 4},
+                "epoch-late": {
+                    "key": _SECOND,
+                    "activation_sequence": 9,
+                    "activation_certificate": _cert(
+                        "epoch-late",
+                        _SECOND,
+                        9,
+                        predecessor_id="epoch-early",
+                        predecessor_key=_SECOND + "x",
+                    ),
+                },
+                "epoch-early": _entry(
+                    4, key=_SECOND + "x", key_id="epoch-early", primary_key_id="epoch-1"
+                ),
             }
         ),
     )
@@ -137,33 +203,137 @@ def test_weak_declared_key_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
             json.dumps({_SECOND_ID: {"key": _SECOND, "activation_sequence": 2, "extra": 1}}),
             "exactly",
         ),
-        (json.dumps({_SECOND_ID: {"key": 7, "activation_sequence": 2}}), "non-string key"),
         (
-            json.dumps({_SECOND_ID: {"key": _SECOND, "activation_sequence": "2"}}),
+            json.dumps(
+                {_SECOND_ID: {"key": 7, "activation_sequence": 2, "activation_certificate": "x"}}
+            ),
+            "non-string key",
+        ),
+        (
+            json.dumps(
+                {
+                    _SECOND_ID: {
+                        "key": _SECOND,
+                        "activation_sequence": "2",
+                        "activation_certificate": "x",
+                    }
+                }
+            ),
             "non-integer",
         ),
         (
-            json.dumps({_SECOND_ID: {"key": _SECOND, "activation_sequence": True}}),
+            json.dumps(
+                {
+                    _SECOND_ID: {
+                        "key": _SECOND,
+                        "activation_sequence": True,
+                        "activation_certificate": "x",
+                    }
+                }
+            ),
             "non-integer",
         ),
         (
-            json.dumps({_SECOND_ID: {"key": _SECOND, "activation_sequence": 0}}),
+            json.dumps(
+                {
+                    _SECOND_ID: {
+                        "key": _SECOND,
+                        "activation_sequence": 0,
+                        "activation_certificate": "x",
+                    }
+                }
+            ),
             "non-positive",
         ),
         (
-            json.dumps({_SECOND_ID: {"key": _SECOND, "activation_sequence": 1}}),
+            json.dumps(
+                {
+                    _SECOND_ID: {
+                        "key": _SECOND,
+                        "activation_sequence": 1,
+                        "activation_certificate": "x",
+                    }
+                }
+            ),
             "reuses activation_sequence",
         ),
         (
             json.dumps(
                 {
-                    "epoch-a": {"key": _SECOND, "activation_sequence": 5},
-                    "epoch-b": {"key": _SECOND + "x", "activation_sequence": 5},
+                    "epoch-a": {
+                        "key": _SECOND,
+                        "activation_sequence": 5,
+                        "activation_certificate": "0" * 64,
+                    },
+                    "epoch-b": {
+                        "key": _SECOND + "x",
+                        "activation_sequence": 5,
+                        "activation_certificate": "0" * 64,
+                    },
                 }
             ),
             "reuses activation_sequence",
         ),
-        (json.dumps({"epoch-1": {"key": _SECOND, "activation_sequence": 2}}), "primary key"),
+        (
+            json.dumps(
+                {
+                    "epoch-1": {
+                        "key": _SECOND,
+                        "activation_sequence": 2,
+                        "activation_certificate": "x",
+                    }
+                }
+            ),
+            "primary key",
+        ),
+        (
+            json.dumps(
+                {
+                    _SECOND_ID: {
+                        "key": _SECOND,
+                        "activation_sequence": 2,
+                        "activation_certificate": "",
+                    }
+                }
+            ),
+            "non-string activation_certificate",
+        ),
+        (
+            json.dumps(
+                {
+                    _SECOND_ID: {
+                        "key": _SECOND,
+                        "activation_sequence": 2,
+                        "activation_certificate": "é" * 64,
+                    }
+                }
+            ),
+            "malformed activation_certificate",
+        ),
+        (
+            json.dumps(
+                {
+                    _SECOND_ID: {
+                        "key": _SECOND,
+                        "activation_sequence": 2,
+                        "activation_certificate": "AB" * 32,
+                    }
+                }
+            ),
+            "malformed activation_certificate",
+        ),
+        (
+            json.dumps(
+                {
+                    _SECOND_ID: {
+                        "key": _SECOND,
+                        "activation_sequence": 2,
+                        "activation_certificate": "ab" * 30,
+                    }
+                }
+            ),
+            "malformed activation_certificate",
+        ),
     ],
 )
 def test_malformed_audit_keys_environment_is_refused(
@@ -183,7 +353,15 @@ def test_environment_failure_never_discloses_key_material(
     monkeypatch.setenv("AGENTGUARD_AUDIT_KEY", _PRIMARY)
     monkeypatch.setenv(
         "AGENTGUARD_AUDIT_KEYS",
-        json.dumps({_SECOND_ID: {"key": _SECOND, "activation_sequence": 0}}),
+        json.dumps(
+            {
+                _SECOND_ID: {
+                    "key": _SECOND,
+                    "activation_sequence": 0,
+                    "activation_certificate": "x",
+                }
+            }
+        ),
     )
 
     with pytest.raises(AuditKeyEnvironmentError) as failure:
@@ -506,3 +684,250 @@ async def test_caller_injected_second_rotation_before_next_event_is_rejected(
             await server.rotate_key("injected-second", (_SECOND + "x").encode())
     finally:
         await server.close()
+
+
+class TestActivationCertificates:
+    """An epoch is trusted only with proof of authorization by its predecessor."""
+
+    def test_env_write_alone_cannot_introduce_an_epoch(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A declaration with a fabricated certificate is refused.
+
+        This is the attack the certificate exists to stop: environment write
+        access without any existing signing key must not mint a signing epoch.
+        """
+        monkeypatch.setenv("AGENTGUARD_AUDIT_KEY", _PRIMARY)
+        monkeypatch.setenv(
+            "AGENTGUARD_AUDIT_KEYS",
+            _declare(2, certificate="0" * 64),
+        )
+        with pytest.raises(AuditKeyEnvironmentError, match="does not verify under predecessor"):
+            AuditKeyring.from_environment()
+
+    def test_self_signed_certificate_is_refused(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A certificate keyed by the NEW key itself proves nothing."""
+        monkeypatch.setenv("AGENTGUARD_AUDIT_KEY", _PRIMARY)
+        forged = _cert(_SECOND_ID, _SECOND, 2, predecessor_key=_SECOND)
+        monkeypatch.setenv("AGENTGUARD_AUDIT_KEYS", _declare(2, certificate=forged))
+        with pytest.raises(AuditKeyEnvironmentError, match="does not verify"):
+            AuditKeyring.from_environment()
+
+    def test_certificate_binds_the_activation_sequence(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("AGENTGUARD_AUDIT_KEY", _PRIMARY)
+        wrong_activation = _cert(_SECOND_ID, _SECOND, 3)
+        monkeypatch.setenv("AGENTGUARD_AUDIT_KEYS", _declare(2, certificate=wrong_activation))
+        with pytest.raises(AuditKeyEnvironmentError, match="does not verify"):
+            AuditKeyring.from_environment()
+
+    def test_certificate_binds_the_key_material(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A valid certificate cannot be reused for a substituted key."""
+        monkeypatch.setenv("AGENTGUARD_AUDIT_KEY", _PRIMARY)
+        for_other_key = _cert(_SECOND_ID, _SECOND + "swap", 2)
+        monkeypatch.setenv("AGENTGUARD_AUDIT_KEYS", _declare(2, certificate=for_other_key))
+        with pytest.raises(AuditKeyEnvironmentError, match="does not verify"):
+            AuditKeyring.from_environment()
+
+    def test_second_epoch_must_be_certified_by_the_first_not_the_primary(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The chain is sequential: skipping a link would let a stolen primary
+        key mint epochs after the primary was rotated away."""
+        monkeypatch.setenv("AGENTGUARD_AUDIT_KEY", _PRIMARY)
+        third = "continuity-third-key-0123456789abcdefgh"
+        entries = {
+            _SECOND_ID: _entry(2),
+            "epoch-3": {
+                "key": third,
+                "activation_sequence": 5,
+                # certified by the PRIMARY instead of epoch-2 — must be refused
+                "activation_certificate": _cert("epoch-3", third, 5),
+            },
+        }
+        monkeypatch.setenv("AGENTGUARD_AUDIT_KEYS", json.dumps(entries))
+        with pytest.raises(AuditKeyEnvironmentError, match="does not verify"):
+            AuditKeyring.from_environment()
+
+    def test_a_full_certificate_chain_verifies(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("AGENTGUARD_AUDIT_KEY", _PRIMARY)
+        third = "continuity-third-key-0123456789abcdefgh"
+        entries = {
+            _SECOND_ID: _entry(2),
+            "epoch-3": {
+                "key": third,
+                "activation_sequence": 5,
+                "activation_certificate": _cert(
+                    "epoch-3", third, 5, predecessor_id=_SECOND_ID, predecessor_key=_SECOND
+                ),
+            },
+        }
+        monkeypatch.setenv("AGENTGUARD_AUDIT_KEYS", json.dumps(entries))
+        keyring = AuditKeyring.from_environment()
+        assert [epoch.activation_sequence for epoch in keyring.epochs] == [1, 2, 5]
+
+    def test_certificate_failure_never_discloses_key_material(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("AGENTGUARD_AUDIT_KEY", _PRIMARY)
+        monkeypatch.setenv("AGENTGUARD_AUDIT_KEYS", _declare(2, certificate="f" * 64))
+        with pytest.raises(AuditKeyEnvironmentError) as failure:
+            AuditKeyring.from_environment()
+        text = str(failure.value)
+        assert _SECOND not in text
+        assert _PRIMARY not in text
+        assert _SECOND[:8] not in text
+
+    def test_certificate_covers_the_fingerprint_not_the_key(self) -> None:
+        """The certificate must not act as an oracle over new key material."""
+        cert_a = _cert(_SECOND_ID, _SECOND, 2)
+        cert_b = _cert(_SECOND_ID, _SECOND, 2)
+        assert cert_a == cert_b  # deterministic
+        assert _SECOND not in cert_a
+        assert len(cert_a) == 64  # a single HMAC-SHA256, nothing else
+
+
+class TestMintActivationCertificate:
+    def _keyring(self, monkeypatch: pytest.MonkeyPatch) -> AuditKeyring:
+        monkeypatch.setenv("AGENTGUARD_AUDIT_KEY", _PRIMARY)
+        monkeypatch.delenv("AGENTGUARD_AUDIT_KEYS", raising=False)
+        return AuditKeyring.from_environment()
+
+    def test_minted_certificate_round_trips_through_the_environment(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        keyring = self._keyring(monkeypatch)
+        certificate = keyring.mint_activation_certificate(
+            key_id=_SECOND_ID, key=_SECOND.encode(), activation_sequence=2
+        )
+        monkeypatch.setenv("AGENTGUARD_AUDIT_KEYS", _declare(2, certificate=certificate))
+        rebuilt = AuditKeyring.from_environment()
+        assert [epoch.key_id for epoch in rebuilt.epochs] == [keyring.legacy_key_id, _SECOND_ID]
+
+    def test_minting_from_the_latest_epoch_chains_correctly(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Certificates minted from a grown keyring bind to the LATEST epoch."""
+        keyring = self._keyring(monkeypatch)
+        cert2 = keyring.mint_activation_certificate(
+            key_id=_SECOND_ID, key=_SECOND.encode(), activation_sequence=2
+        )
+        monkeypatch.setenv("AGENTGUARD_AUDIT_KEYS", _declare(2, certificate=cert2))
+        grown = AuditKeyring.from_environment()
+        third = "continuity-third-key-0123456789abcdefgh"
+        cert3 = grown.mint_activation_certificate(
+            key_id="epoch-3", key=third.encode(), activation_sequence=7
+        )
+        entries = json.loads(_declare(2, certificate=cert2))
+        entries["epoch-3"] = {
+            "key": third,
+            "activation_sequence": 7,
+            "activation_certificate": cert3,
+        }
+        monkeypatch.setenv("AGENTGUARD_AUDIT_KEYS", json.dumps(entries))
+        full = AuditKeyring.from_environment()
+        assert [epoch.activation_sequence for epoch in full.epochs] == [1, 2, 7]
+
+    def test_rebinding_an_existing_id_is_refused(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        keyring = self._keyring(monkeypatch)
+        with pytest.raises(ValueError, match="cannot be rebound"):
+            keyring.mint_activation_certificate(
+                key_id=keyring.legacy_key_id, key=_SECOND.encode(), activation_sequence=2
+            )
+
+    def test_non_monotonic_activation_is_refused(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        keyring = self._keyring(monkeypatch)
+        with pytest.raises(ValueError, match="strictly follow"):
+            keyring.mint_activation_certificate(
+                key_id=_SECOND_ID, key=_SECOND.encode(), activation_sequence=1
+            )
+
+    def test_weak_new_key_is_refused(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        keyring = self._keyring(monkeypatch)
+        with pytest.raises(AuditKeyWeakError):
+            keyring.mint_activation_certificate(
+                key_id=_SECOND_ID, key=b"short", activation_sequence=2
+            )
+
+    def test_empty_key_id_is_refused(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        keyring = self._keyring(monkeypatch)
+        with pytest.raises(ValueError, match="must not be empty"):
+            keyring.mint_activation_certificate(
+                key_id="", key=_SECOND.encode(), activation_sequence=2
+            )
+
+
+class TestMintCertificateCli:
+    def test_cli_mints_an_entry_that_round_trips(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from typer.testing import CliRunner
+
+        from agentguard.cli import app
+
+        monkeypatch.setenv("AGENTGUARD_AUDIT_KEY", _PRIMARY)
+        monkeypatch.delenv("AGENTGUARD_AUDIT_KEYS", raising=False)
+        monkeypatch.setenv("AGENTGUARD_NEW_AUDIT_KEY", _SECOND)
+        result = CliRunner().invoke(
+            app,
+            [
+                "audit",
+                "mint-epoch-certificate",
+                "--key-id",
+                _SECOND_ID,
+                "--activation-sequence",
+                "2",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        entry = json.loads(result.output.strip())
+        monkeypatch.setenv("AGENTGUARD_AUDIT_KEYS", json.dumps(entry))
+        rebuilt = AuditKeyring.from_environment()
+        assert rebuilt.epochs[-1].key_id == _SECOND_ID
+        assert rebuilt.epochs[-1].activation_sequence == 2
+
+    def test_cli_refuses_without_the_new_key_variable(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from typer.testing import CliRunner
+
+        from agentguard.cli import app
+
+        monkeypatch.setenv("AGENTGUARD_AUDIT_KEY", _PRIMARY)
+        monkeypatch.delenv("AGENTGUARD_AUDIT_KEYS", raising=False)
+        monkeypatch.delenv("AGENTGUARD_NEW_AUDIT_KEY", raising=False)
+        result = CliRunner().invoke(
+            app,
+            ["audit", "mint-epoch-certificate", "--key-id", "x", "--activation-sequence", "2"],
+        )
+        assert result.exit_code == 1
+        assert "AGENTGUARD_NEW_AUDIT_KEY" in result.output
+
+    def test_cli_refuses_a_weak_new_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from typer.testing import CliRunner
+
+        from agentguard.cli import app
+
+        monkeypatch.setenv("AGENTGUARD_AUDIT_KEY", _PRIMARY)
+        monkeypatch.delenv("AGENTGUARD_AUDIT_KEYS", raising=False)
+        monkeypatch.setenv("AGENTGUARD_NEW_AUDIT_KEY", "short")
+        result = CliRunner().invoke(
+            app,
+            ["audit", "mint-epoch-certificate", "--key-id", "x", "--activation-sequence", "2"],
+        )
+        assert result.exit_code == 1
+        assert "refused" in result.output.lower()
+
+
+def test_non_ascii_certificate_is_a_clean_environment_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A non-ASCII certificate must be an AuditKeyEnvironmentError, not a TypeError.
+
+    hmac.compare_digest raises TypeError on non-ASCII input; that would escape
+    every ``except AuditError`` fail-closed handler. Reject the malformed
+    certificate structurally before the comparison.
+    """
+    monkeypatch.setenv("AGENTGUARD_AUDIT_KEY", _PRIMARY)
+    monkeypatch.setenv("AGENTGUARD_AUDIT_KEYS", _declare(2, certificate="é" * 64))
+    with pytest.raises(AuditKeyEnvironmentError, match="malformed activation_certificate"):
+        AuditKeyring.from_environment()

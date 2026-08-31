@@ -8,6 +8,22 @@ reaches 1.0.
 
 ## [Unreleased]
 
+### Changed (2026-08-30) — BREAKING for `AGENTGUARD_AUDIT_KEYS`
+
+- Every epoch declared in `AGENTGUARD_AUDIT_KEYS` must now carry an
+  `activation_certificate`: an HMAC (domain
+  `agentguard.audit.key-epoch-activation.v1`) over the epoch's key id, key
+  fingerprint, activation sequence, and predecessor key id, keyed by the
+  predecessor epoch's key — the primary key for the first declared epoch, then
+  each declared epoch in activation order. Environment write access alone can
+  no longer introduce a signing epoch; a declaration is proof of authorization
+  by the previous key holder. Certificates are minted with
+  `AuditKeyring.mint_activation_certificate(...)` or `agentguard audit
+  mint-epoch-certificate` (new key read from `AGENTGUARD_NEW_AUDIT_KEY`).
+  Two-field declarations without a certificate now fail closed at startup.
+  The `adopt_declared_epochs=True` restart gate is retained as defense in
+  depth.
+
 ### Added (limitation closures, 2026-08-29)
 
 - Added a governed path for non-model adverse-action reasons. A `policy_rule` reason is produced

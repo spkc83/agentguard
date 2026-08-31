@@ -95,7 +95,7 @@ from agentguard.core.sandbox import (
 
 | Module | Purpose | On governed path? |
 |--------|---------|-------------------|
-| `core.audit` | Local versioned HMAC chain/checkpoints through `AppendOnlyAuditLog`, plus the `AuditLog` application protocol used by local and collector clients. Schema v5 signs typed HITL evidence, schema v6 signs typed `ReconciliationEvidence`, schema v7 signs typed `AuthenticationEvidence`, and schema v8 signs typed `RegistryMutationEvidence`; historical v1-v7 records retain their exact signed forms. `AGENTGUARD_AUDIT_KEY` must be ≥32 bytes (`AuditKeyWeakError`); `AGENTGUARD_AUDIT_KEYS` declares additional signing epochs for rotation continuity. A `trusted_checkpoint` witness turns a log rolled back behind it into `AuditRollbackDetectedError` (a subclass of `AuditTamperDetectedError`); `verify_checkpoint_signature()` authenticates a witness without binding it to history. | Yes |
+| `core.audit` | Local versioned HMAC chain/checkpoints through `AppendOnlyAuditLog`, plus the `AuditLog` application protocol used by local and collector clients. Schema v5 signs typed HITL evidence, schema v6 signs typed `ReconciliationEvidence`, schema v7 signs typed `AuthenticationEvidence`, and schema v8 signs typed `RegistryMutationEvidence`; historical v1-v7 records retain their exact signed forms. `AGENTGUARD_AUDIT_KEY` must be ≥32 bytes (`AuditKeyWeakError`); `AGENTGUARD_AUDIT_KEYS` declares additional signing epochs for rotation continuity, and every declared epoch must carry an `activation_certificate` — an HMAC under the predecessor epoch's key, minted with `AuditKeyring.mint_activation_certificate` or `agentguard audit mint-epoch-certificate` — so environment write access alone cannot introduce a signing epoch. A `trusted_checkpoint` witness turns a log rolled back behind it into `AuditRollbackDetectedError` (a subclass of `AuditTamperDetectedError`); `verify_checkpoint_signature()` authenticates a witness without binding it to history. | Yes |
 | `core.audit_collector` | `AuditCollectorServer` / `SigningAuditBackend`: out-of-process UDS signing so application processes never hold the key. Optional `trusted_checkpoint_path` (outside the state directory) is refused at startup when local history is behind it and is atomically re-exported after every checkpoint; `rotate_key` on an environment-sourced keyring refuses epochs not declared in `AGENTGUARD_AUDIT_KEYS` (`AuditKeyRotationRefusedError`); the full-event cache is bounded (`max_cached_events`) while duplicate detection stays complete. | Yes, when configured |
 | `core.authentication` | Mechanism-neutral async protocols and frozen credential-derived principals. Agent principals contain identity and validity facts but no roles/capabilities; the control-plane principal is a distinct type. | Yes, in secure kernel mode |
 | `core.jwt_authentication` | Optional offline RS256 verifier, immutable pinned key snapshots, pluggable key/replay state, atomic one-use token IDs, bounded key overlap, and emergency revocation. It performs no OIDC discovery or network key lookup. | Yes, when supplied to a secure kernel |
@@ -532,7 +532,7 @@ supplied its mode is already fixed and a second adapter-level mode is rejected.
 The complete command surface:
 
 ```
-agentguard audit show|verify|replay|export-checkpoint
+agentguard audit show|verify|replay|export-checkpoint|mint-epoch-certificate
 agentguard policy validate|report
 agentguard verify rbac|policy
 agentguard observe dashboard|replay|summary
@@ -542,7 +542,10 @@ agentguard observe dashboard|replay|summary
 stdout or an owner-only witness file (refusing to roll an existing witness
 back or rebind it to a forked chain); `agentguard audit verify
 --trusted-checkpoint <file>` reports ROLLBACK DETECTED with a nonzero exit
-when the local head is behind the witness. `agentguard policy validate`
+when the local head is behind the witness. `agentguard audit
+mint-epoch-certificate` mints the predecessor-keyed activation certificate a
+new `AGENTGUARD_AUDIT_KEYS` epoch must carry (new key read from
+`AGENTGUARD_NEW_AUDIT_KEY`; stdout contains key material). `agentguard policy validate`
 takes `--policy-dir`, not `--file`. There is no `agentguard sandbox` command
 group.
 
