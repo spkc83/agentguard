@@ -636,6 +636,20 @@ one. A decline with no basis at all still fails closed, and the notice control a
 selection recomputed from the decision's own bases, so a human decline can never be signed by
 restating the model's reasons.
 
+**Pre-scoring declines.** A knockout or incomplete-application decline ruled out *before* any model
+runs has no PD, model identity, or attribution. The model reference (`pd_score` + `model_id` +
+`model_version`) is therefore optional on `CreditDecisionCandidate` as an all-or-nothing group: an
+absent reference is legal only on a decline that carries a `PolicyDenialSelection` or
+`ReviewJudgment` and no model attribution or model reasons, and a partial reference is rejected.
+`GovernedCreditAgent.decide_without_score(policy_denial=...)` emits such a decline through the full
+kernel; the decision and its notice carry no `model` audit link, and their audit evidence
+(`DecisionAuditEvidence.model_ref`, `NoticeIssueEvidence.model_ref`) omits the model reference.
+`ModelProvenanceGuardrail` admits a no-model decision only after re-checking that it is a
+structurally valid no-model decline, so the branch cannot become a bypass — a decision that carries
+any model reference always takes the provenance path and still fails closed without current signed
+evidence. `find_unresolved_declines` resolves a pre-scoring decline by its notice through the
+decision link, needing no model link.
+
 **Roadmap — formal verification hook.** Model monotonicity and an adverse-action ordering proof
 are not implemented. Runtime reason and notice controls enforce concrete evidence contracts, but
 they do not constitute those formal proofs.

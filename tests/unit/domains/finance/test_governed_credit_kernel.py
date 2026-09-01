@@ -567,3 +567,46 @@ async def test_hard_policy_decline_overrides_the_approve_band_and_states_its_rul
     )
     assert "POLICY-COLLATERAL-LTV" not in serialized
     assert "collateral_ltv" not in serialized
+
+
+@pytest.mark.asyncio
+async def test_pre_scoring_decline_is_governed_and_resolved_by_its_notice(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A knockout/incomplete decline with NO model score runs the full chain,
+    emits no model link, and is resolved by a notice citing the policy rule."""
+    monkeypatch.setenv("AGENTGUARD_AUDIT_KEY", "credit-kernel-prescoring-decl-pad")
+    _, agent, audit, agent_id = await _kernel_and_agent(
+        tmp_path,
+        allowed_actions=("decision:decline", "notice:issue"),
+    )
+    denial = policy_denial(application_ref=APPLICATION_ID, decision_id=DECISION_ID)
+
+    candidate = await agent.decide_without_score(
+        decision_id=DECISION_ID,
+        application_ref=APPLICATION_ID,
+        policy_denial=denial,
+        agent_id=agent_id,
+    )
+    notice = _denial(reasons=PrincipalReasonSelection.from_decision_basis(policy_denial=denial))
+    await agent.issue_notice(candidate=candidate, notice=notice, agent_id=agent_id)
+
+    assert candidate.outcome is CreditDecisionOutcome.DECLINE
+    assert candidate.has_model_reference is False
+    assert candidate.pd_score is None
+    assert await find_unresolved_declines(audit) == ()
+    events = (await audit.read_verified(require_checkpoint=True)).events
+    decline = next(
+        event
+        for event in events
+        if event.event_type == "delivery_completed" and event.action == "decision:decline"
+    )
+    # No model reference means no model audit link on the governed decision.
+    assert not any(link.relation == "model" for link in decline.links)
+    serialized = json.dumps(
+        [event.model_dump(mode="json") for event in events],
+        sort_keys=True,
+    )
+    assert "POLICY-COLLATERAL-LTV" not in serialized
+    assert "collateral_ltv" not in serialized

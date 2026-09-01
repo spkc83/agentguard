@@ -170,3 +170,44 @@ def test_provider_rejects_duplicate_exact_model_evidence() -> None:
     evidence = _evidence()
     with pytest.raises(ValueError, match="duplicate"):
         StaticModelGovernanceEvidenceProvider((evidence, evidence))
+
+
+def _no_model_decline_context() -> GuardrailContext:
+    """A pre-scoring decline: no model reference, policy basis, DECLINE."""
+    from tests.unit.domains.finance.test_decision_reasons import policy_denial
+
+    denial = policy_denial(application_ref="APPLICATION-001", decision_id="DECISION-001")
+    candidate = CreditDecisionPolicy().evaluate(
+        decision_id="DECISION-001",
+        application_ref="APPLICATION-001",
+        policy_denial=denial,
+    )
+    return GuardrailContext.model_validate(
+        {
+            "trace_id": "trace-1",
+            "invocation_id": "invocation-1",
+            "stage": GuardrailStage.ON_DECISION,
+            "identity": IdentitySnapshot(agent_id="agent-1", name="Credit Agent"),
+            "action": "decision:decline",
+            "resource": "application/opaque-1",
+            "payload": candidate.to_payload(),
+            "attributes": {},
+        }
+    )
+
+
+@pytest.mark.asyncio
+async def test_pre_scoring_decline_needs_no_model_provenance() -> None:
+    """A structurally valid no-model decline is admitted with no provenance evidence."""
+    outcome = await _guardrail().evaluate(_no_model_decline_context())
+    assert outcome.effect is GuardrailEffect.ALLOW
+
+
+@pytest.mark.asyncio
+async def test_no_model_branch_is_not_a_bypass_for_a_model_backed_decision() -> None:
+    """A decision that carries a model reference still needs provenance — the
+    no-model branch is unreachable for it, so stripping evidence still denies."""
+    context = _context().model_copy(update={"action": "decision:decline"})
+    outcome = await _guardrail().evaluate(context)
+    assert outcome.effect is GuardrailEffect.DENY
+    assert outcome.reason_codes == (MRM_MODEL_UNVALIDATED,)

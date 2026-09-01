@@ -90,7 +90,8 @@ class NoticeIssueEvidence(BaseModel):
     application_ref: str = Field(pattern=r"^[0-9a-f]{64}$")
     decision_ref: str = Field(pattern=r"^[0-9a-f]{64}$")
     notice_ref: str = Field(pattern=r"^[0-9a-f]{64}$")
-    model_ref: str = Field(pattern=r"^[0-9a-f]{64}$")
+    # None for a pre-scoring decline notice, which rests on no model score.
+    model_ref: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     artifact_type: str
     profile: str
     template_version: str
@@ -241,15 +242,19 @@ def prepare_notice_record(
     )
     decision_ref = opaque_credit_ref("credit-decision", candidate.decision_id)
     notice_ref = opaque_credit_ref("credit-notice", notice.notice_id)
-    model_ref = opaque_credit_ref(
-        "credit-model",
-        f"{candidate.model_id}:{candidate.model_version}",
+    model_ref = (
+        opaque_credit_ref(
+            "credit-model",
+            f"{candidate.model_id}:{candidate.model_version}",
+        ).value
+        if candidate.has_model_reference
+        else None
     )
     evidence = NoticeIssueEvidence(
         application_ref=application_ref.value,
         decision_ref=decision_ref.value,
         notice_ref=notice_ref.value,
-        model_ref=model_ref.value,
+        model_ref=model_ref,
         artifact_type=type(notice).__name__,
         profile=rendered.profile.value,
         template_version=rendered.template_version,
@@ -274,32 +279,33 @@ def notice_audit_references(
         namespace="credit-application",
         value=evidence.application_ref,
     )
-    return (
-        subject_ref,
-        (
-            AuditLink(
-                relation="decision",
-                target=EvidenceRef(
-                    namespace="credit-decision",
-                    value=evidence.decision_ref,
-                ),
+    links = [
+        AuditLink(
+            relation="decision",
+            target=EvidenceRef(
+                namespace="credit-decision",
+                value=evidence.decision_ref,
             ),
-            AuditLink(
-                relation="notice",
-                target=EvidenceRef(
-                    namespace="credit-notice",
-                    value=evidence.notice_ref,
-                ),
+        ),
+        AuditLink(
+            relation="notice",
+            target=EvidenceRef(
+                namespace="credit-notice",
+                value=evidence.notice_ref,
             ),
+        ),
+    ]
+    if evidence.model_ref is not None:
+        links.append(
             AuditLink(
                 relation="model",
                 target=EvidenceRef(
                     namespace="credit-model",
                     value=evidence.model_ref,
                 ),
-            ),
-        ),
-    )
+            )
+        )
+    return subject_ref, tuple(links)
 
 
 class NoticeCompletenessGuardrail:

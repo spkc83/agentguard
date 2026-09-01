@@ -26,6 +26,7 @@ from agentguard.guardrails.reason_codes import (
     MRM_MODEL_UNVALIDATED,
 )
 
+from .agent_templates import CreditDecisionOutcome
 from .decision_guardrails import _invalid_payload, parse_credit_candidate
 from .model_validation import (
     ModelValidationReport,
@@ -459,6 +460,20 @@ class ModelProvenanceGuardrail:
         candidate = parse_credit_candidate(context)
         if candidate is None:
             return _invalid_payload()
+        if not candidate.has_model_reference:
+            # A pre-scoring decline (incomplete application / hard knockout) rests
+            # on no model, so there is no provenance to check. Admit it only when
+            # it is a structurally valid no-model decline — re-checked here rather
+            # than trusted from the candidate, so this cannot become a bypass for
+            # a decision that should carry a model: a model-backed decision can
+            # never reach this branch (has_model_reference would be True), and a
+            # decline that stripped its model but kept no lawful non-model basis
+            # is rejected.
+            if candidate.outcome is not CreditDecisionOutcome.DECLINE or (
+                candidate.policy_denial is None and candidate.review_judgment is None
+            ):
+                return self._unvalidated()
+            return GuardrailOutcome(effect=GuardrailEffect.ALLOW)
         attribution = candidate.attribution
         if (
             attribution is None

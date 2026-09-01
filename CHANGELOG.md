@@ -8,6 +8,20 @@ reaches 1.0.
 
 ## [Unreleased]
 
+### Added
+
+- Governed pre-scoring adverse-action declines. A knockout or incomplete-application decline ruled
+  out before any model runs can now be represented and issued: the model reference
+  (`pd_score`/`model_id`/`model_version`) is optional on `CreditDecisionCandidate` as an
+  all-or-nothing group, legal only on a decline carrying a `PolicyDenialSelection` or
+  `ReviewJudgment` with no model attribution or reasons (a partial reference is rejected).
+  `GovernedCreditAgent.decide_without_score(policy_denial=...)` emits it through the full kernel with
+  no `model` audit link; `DecisionAuditEvidence.model_ref` and `NoticeIssueEvidence.model_ref` are
+  optional; `ModelProvenanceGuardrail` admits a no-model decline only after re-checking it is
+  structurally valid, so the branch is not a bypass for a model-backed decision. This closes the
+  last truthful-representation gap in the credit domain (previously an incomplete-application decline
+  could only cite model reasons).
+
 ## [0.9.0] - 2026-08-31
 
 The guardrails realignment: AgentGuard moves from a governance decorator to a

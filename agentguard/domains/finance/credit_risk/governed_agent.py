@@ -94,7 +94,9 @@ class DecisionAuditEvidence(BaseModel):
 
     application_ref: str = Field(pattern=r"^[0-9a-f]{64}$")
     decision_ref: str = Field(pattern=r"^[0-9a-f]{64}$")
-    model_ref: str = Field(pattern=r"^[0-9a-f]{64}$")
+    # None for a pre-scoring decline (incomplete application / hard knockout),
+    # which has no model score. A model-backed decision always carries it.
+    model_ref: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     policy_ref: str = Field(pattern=r"^[0-9a-f]{64}$")
     outcome: CreditDecisionOutcome
 
@@ -102,12 +104,15 @@ class DecisionAuditEvidence(BaseModel):
 def decision_audit_evidence(candidate: CreditDecisionCandidate) -> DecisionAuditEvidence:
     """Project a full candidate into the only fields retained in audit evidence."""
 
+    model_ref = (
+        opaque_credit_ref("credit-model", f"{candidate.model_id}:{candidate.model_version}").value
+        if candidate.has_model_reference
+        else None
+    )
     return DecisionAuditEvidence(
         application_ref=opaque_credit_ref("credit-application", candidate.application_ref).value,
         decision_ref=opaque_credit_ref("credit-decision", candidate.decision_id).value,
-        model_ref=opaque_credit_ref(
-            "credit-model", f"{candidate.model_id}:{candidate.model_version}"
-        ).value,
+        model_ref=model_ref,
         policy_ref=opaque_credit_ref(
             "credit-policy", f"{candidate.policy_id}:{candidate.policy_version}"
         ).value,
@@ -118,22 +123,23 @@ def decision_audit_evidence(candidate: CreditDecisionCandidate) -> DecisionAudit
 def decision_audit_references(
     evidence: DecisionAuditEvidence,
 ) -> tuple[EvidenceRef, tuple[AuditLink, ...]]:
-    """Return the opaque application subject plus decision and model links."""
+    """Return the opaque application subject plus decision and (if any) model links."""
 
     subject_ref = EvidenceRef(namespace="credit-application", value=evidence.application_ref)
-    return (
-        subject_ref,
-        (
-            AuditLink(
-                relation="decision",
-                target=EvidenceRef(namespace="credit-decision", value=evidence.decision_ref),
-            ),
+    links = [
+        AuditLink(
+            relation="decision",
+            target=EvidenceRef(namespace="credit-decision", value=evidence.decision_ref),
+        ),
+    ]
+    if evidence.model_ref is not None:
+        links.append(
             AuditLink(
                 relation="model",
                 target=EvidenceRef(namespace="credit-model", value=evidence.model_ref),
-            ),
-        ),
-    )
+            )
+        )
+    return subject_ref, tuple(links)
 
 
 class GovernedCreditAgent:
@@ -239,6 +245,38 @@ class GovernedCreditAgent:
             model_version=score.attribution.model_version,
             attribution=score.attribution,
             reason_selection=reason_selection,
+            policy_denial=policy_denial,
+        )
+        return await self._emit_candidate(
+            candidate,
+            action=f"decision:{candidate.outcome.value}",
+            agent_id=agent_id,
+            credential=credential,
+        )
+
+    async def decide_without_score(
+        self,
+        *,
+        decision_id: str,
+        application_ref: str,
+        policy_denial: PolicyDenialSelection,
+        agent_id: str | None = None,
+        credential: object | None = None,
+    ) -> CreditDecisionCandidate:
+        """Emit a pre-scoring decline through the full kernel with no model reference.
+
+        A pre-scoring decline is a hard knockout or incomplete application ruled
+        out before any model runs, so it has no PD, model id, or attribution. Its
+        principal reasons come from a recorded credit-policy ``policy_denial``
+        (verified by :class:`PolicyReasonIntegrityGuardrail`), so the notice
+        states the true reason without borrowing a model's. The emitted decision
+        carries no ``model`` audit link, and the provenance guardrail admits it
+        only because it is a structurally valid no-model decline.
+        """
+
+        candidate = self._policy.evaluate(
+            decision_id=decision_id,
+            application_ref=application_ref,
             policy_denial=policy_denial,
         )
         return await self._emit_candidate(

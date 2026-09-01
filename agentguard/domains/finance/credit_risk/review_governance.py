@@ -271,6 +271,10 @@ async def verify_review_escalation(
 
     decision_link, model_link = _exact_links(request)
     application_ref = opaque_credit_ref("credit-application", candidate.application_ref)
+    # Review overrides are a model-backed path: a REVIEW-band outcome only arises
+    # from a scored candidate, so the model reference is present here. If a
+    # no-model review override is ever introduced, this must branch on
+    # candidate.has_model_reference like the decision/notice evidence does.
     expected_model_ref = opaque_credit_ref(
         "credit-model", f"{candidate.model_id}:{candidate.model_version}"
     )

@@ -84,11 +84,15 @@ class CreditDecisionCandidate(BaseModel):
     decision_id: str
     application_ref: str
     outcome: CreditDecisionOutcome
-    pd_score: float
+    # The model reference (pd_score + model_id + model_version) is optional as a
+    # group: a decline taken BEFORE scoring — an incomplete application or a hard
+    # knockout — has no model score. It is all-or-nothing (see the validator), so
+    # a partial model reference can never be recorded.
+    pd_score: float | None = None
     policy_id: str
     policy_version: str
-    model_id: str
-    model_version: str
+    model_id: str | None = None
+    model_version: str | None = None
     attribution: AttributionResult | None = None
     reason_selection: ReasonCodeSelection | None = None
     policy_denial: PolicyDenialSelection | None = None
@@ -104,13 +108,17 @@ class CreditDecisionCandidate(BaseModel):
         "model_version",
     )
     @classmethod
-    def _validate_identifiers(cls, value: str, info: object) -> str:
+    def _validate_identifiers(cls, value: str | None, info: object) -> str | None:
+        if value is None:
+            return None
         field_name = getattr(info, "field_name", "identifier")
         return _canonical_text(value, field_name=field_name)
 
     @field_validator("pd_score", mode="before")
     @classmethod
-    def _validate_pd(cls, value: object) -> float:
+    def _validate_pd(cls, value: object) -> float | None:
+        if value is None:
+            return None
         if isinstance(value, bool) or not isinstance(value, Real):
             raise ValueError("pd_score must be a finite value in [0, 1]")
         result = float(value)
@@ -118,8 +126,40 @@ class CreditDecisionCandidate(BaseModel):
             raise ValueError("pd_score must be a finite value in [0, 1]")
         return result
 
+    @property
+    def has_model_reference(self) -> bool:
+        """Whether this decision rests on a model score (all model fields present)."""
+
+        return (
+            self.pd_score is not None
+            and self.model_id is not None
+            and self.model_version is not None
+        )
+
     @model_validator(mode="after")
     def _validate_reason_state(self) -> CreditDecisionCandidate:
+        # The model reference is all-or-nothing: a partial reference could let a
+        # decision claim a model on one axis (e.g. a model_id link) while omitting
+        # the score the provenance guardrail checks.
+        model_fields = (self.pd_score, self.model_id, self.model_version)
+        present = sum(field is not None for field in model_fields)
+        if present not in (0, len(model_fields)):
+            raise ValueError(
+                "a model reference requires pd_score, model_id, and model_version together"
+            )
+        if not self.has_model_reference:
+            # A pre-scoring decision must be a decline carried by a model-independent
+            # basis, and it must not smuggle in model attribution or model reasons.
+            if self.outcome is not CreditDecisionOutcome.DECLINE:
+                raise ValueError("a decision without a model score must be a decline")
+            if self.policy_denial is None and self.review_judgment is None:
+                raise ValueError(
+                    "a decline without a model score requires a policy or review basis"
+                )
+            if self.attribution is not None or self.reason_selection is not None:
+                raise ValueError(
+                    "a decline without a model score cannot carry model attribution or reasons"
+                )
         bases = (self.reason_selection, self.policy_denial, self.review_judgment)
         if self.reason_failure is not None and any(basis is not None for basis in bases):
             raise ValueError("a reason failure excludes every principal-reason basis")
@@ -167,22 +207,33 @@ class CreditDecisionPolicy:
         *,
         decision_id: str,
         application_ref: str,
-        pd_score: float,
-        model_id: str,
-        model_version: str,
+        pd_score: float | None = None,
+        model_id: str | None = None,
+        model_version: str | None = None,
         attribution: AttributionResult | None = None,
         reason_selection: ReasonCodeSelection | None = None,
         policy_denial: PolicyDenialSelection | None = None,
+        review_judgment: ReviewJudgment | None = None,
         reason_failure: AdverseActionFailure | None = None,
     ) -> CreditDecisionCandidate:
         """Classify one PD without fabricating reasons or inspecting raw features.
 
         A recorded credit-policy overlay denial is a hard cutoff: it declines the
-        application whatever band the PD falls in.
+        application whatever band the PD falls in. When no model score is supplied
+        (a pre-scoring knockout or incomplete application), a policy or review
+        basis is required and the outcome is always a decline; the candidate
+        carries no model reference. Passing part of a model reference — a score
+        without its model identity, or vice versa — is rejected downstream.
         """
 
         config = self._config
-        if policy_denial is not None:
+        if pd_score is None or model_id is None or model_version is None:
+            if policy_denial is None and review_judgment is None:
+                raise ValueError(
+                    "a decision without a model score requires a policy or review basis"
+                )
+            outcome = CreditDecisionOutcome.DECLINE
+        elif policy_denial is not None:
             outcome = CreditDecisionOutcome.DECLINE
         elif pd_score < config.auto_approve_threshold:
             outcome = CreditDecisionOutcome.APPROVE
@@ -202,5 +253,6 @@ class CreditDecisionPolicy:
             attribution=attribution,
             reason_selection=reason_selection,
             policy_denial=policy_denial,
+            review_judgment=review_judgment,
             reason_failure=reason_failure,
         )
